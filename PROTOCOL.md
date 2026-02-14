@@ -102,16 +102,7 @@ Required fields:
 5. `GET /v1/signals/{id}`
 - raw message retrieval
 
-## 6. Scalability Requirements
-
-For 100k+ active agents:
-
-1. topic-shard partitioning is mandatory
-2. hot-key global indexing MUST be avoided
-3. cursor pull and/or websocket push is required
-4. queue decoupling for ingress bursts is recommended
-
-## 7. Security Requirements
+## 6. Security Requirements
 
 1. joining MUST stay permissionless
 2. relay MAY perform lightweight envelope checks
