@@ -48,12 +48,6 @@ type BatchPublishResponse struct {
 	} `json:"errors"`
 }
 
-type FeedResponse struct {
-	Topic   string      `json:"topic"`
-	Count   int         `json:"count"`
-	Entries []FeedEntry `json:"entries"`
-}
-
 type CursorFeedResponse struct {
 	Topic      string      `json:"topic"`
 	Shard      int         `json:"shard"`
@@ -93,25 +87,17 @@ func NewClient(baseURL string) *Client {
 }
 
 func (c *Client) Publish(signal string) (*PublishResponse, error) {
-	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/v1/signals", strings.NewReader(signal))
+	batch, err := c.PublishBatch([]string{signal})
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Content-Type", "text/markdown; charset=utf-8")
-	resp, err := c.http().Do(req)
-	if err != nil {
-		return nil, err
+	if batch.Accepted > 0 && len(batch.Entries) > 0 {
+		return &PublishResponse{Accepted: true, ID: batch.Entries[0].ID, StoredAt: time.Now().UTC().Format(time.RFC3339)}, nil
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusCreated {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return nil, fmt.Errorf("publish failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
+	if len(batch.Errors) > 0 && batch.Errors[0].Reason != "" {
+		return nil, fmt.Errorf("publish failed: %s", batch.Errors[0].Reason)
 	}
-	var out PublishResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return &out, nil
+	return nil, fmt.Errorf("publish failed")
 }
 
 func (c *Client) PublishBatch(signals []string) (*BatchPublishResponse, error) {
@@ -119,7 +105,7 @@ func (c *Client) PublishBatch(signals []string) (*BatchPublishResponse, error) {
 	if err != nil {
 		return nil, err
 	}
-	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/v2/publish-batch", bytes.NewReader(raw))
+	req, err := http.NewRequest(http.MethodPost, c.BaseURL+"/v1/publish-batch", bytes.NewReader(raw))
 	if err != nil {
 		return nil, err
 	}
@@ -141,43 +127,7 @@ func (c *Client) PublishBatch(signals []string) (*BatchPublishResponse, error) {
 }
 
 func (c *Client) PublishFast(signal string) (*PublishResponse, error) {
-	batch, err := c.PublishBatch([]string{signal})
-	if err == nil && batch != nil && batch.Accepted > 0 && len(batch.Entries) > 0 {
-		return &PublishResponse{Accepted: true, ID: batch.Entries[0].ID, StoredAt: time.Now().UTC().Format(time.RFC3339)}, nil
-	}
 	return c.Publish(signal)
-}
-
-func (c *Client) Feed(topic string, limit int) (*FeedResponse, error) {
-	q := url.Values{}
-	if topic != "" {
-		q.Set("topic", topic)
-	}
-	if limit > 0 {
-		q.Set("limit", strconv.Itoa(limit))
-	}
-	u := c.BaseURL + "/v1/feed"
-	if encoded := q.Encode(); encoded != "" {
-		u += "?" + encoded
-	}
-	req, err := http.NewRequest(http.MethodGet, u, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := c.http().Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 8192))
-		return nil, fmt.Errorf("feed failed: status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var out FeedResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
-	}
-	return &out, nil
 }
 
 func (c *Client) FeedCursor(topic string, shard int, cursor int64, limit int) (*CursorFeedResponse, error) {
@@ -188,7 +138,7 @@ func (c *Client) FeedCursor(topic string, shard int, cursor int64, limit int) (*
 	if limit > 0 {
 		q.Set("limit", strconv.Itoa(limit))
 	}
-	u := c.BaseURL + "/v2/feed?" + q.Encode()
+	u := c.BaseURL + "/v1/feed?" + q.Encode()
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -213,7 +163,7 @@ func (c *Client) ResolveShard(topic, key string) (*ShardResolveResponse, error) 
 	q := url.Values{}
 	q.Set("topic", topic)
 	q.Set("key", key)
-	u := c.BaseURL + "/v2/resolve-shard?" + q.Encode()
+	u := c.BaseURL + "/v1/resolve-shard?" + q.Encode()
 	req, err := http.NewRequest(http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err

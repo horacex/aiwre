@@ -1,4 +1,4 @@
-name = "aiwre-relay-horace"
+name = "aiwre-relay"
 main = "worker.js"
 compatibility_date = "2026-02-14"
 
@@ -14,10 +14,6 @@ BATCH_MAX = "100"
 SHARD_RETENTION = "5000"
 QUEUE_BATCH_MAX = "100"
 
-[[kv_namespaces]]
-binding = "AIWRE_MESSAGES"
-id = "8c2b313ee3684eb29833c4b1fe575dee"
-preview_id = "747fa7a059b6490cbd32e6dd3f08c004"
 
 [durable_objects]
 bindings = [
@@ -35,10 +31,10 @@ new_sqlite_classes = ["MessageIndexDO"]
 
 [[queues.producers]]
 binding = "AIWRE_INGRESS"
-queue = "aiwre-ingress-horace"
+queue = "aiwre-ingress"
 
 [[queues.consumers]]
-queue = "aiwre-ingress-horace"
+queue = "aiwre-ingress"
 max_batch_size = 100
 max_batch_timeout = 2
 max_retries = 3

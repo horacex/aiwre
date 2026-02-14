@@ -15,44 +15,30 @@ export default {
 
     try {
       if (request.method === 'GET' && pathname === '/health') {
-        return withCors(json({ ok: true, service: 'aiwre-relay', version: 'v2.2' }), env);
+        return withCors(json({ ok: true, service: 'aiwre-relay', version: 'v1.0' }), env);
       }
 
       if (request.method === 'GET' && pathname === '/.well-known/aiwre-bootstrap.json') {
         return withCors(handleBootstrap(url, env), env);
       }
 
-      if (request.method === 'GET' && pathname === '/v2/resolve-shard') {
+      if (request.method === 'GET' && pathname === '/v1/resolve-shard') {
         return withCors(handleResolveShard(url, env), env);
       }
 
-      if (request.method === 'POST' && pathname === '/v2/publish-batch') {
+      if (request.method === 'POST' && pathname === '/v1/publish-batch') {
         return withCors(await handlePublishBatch(request, env), env);
       }
 
-      if (request.method === 'GET' && pathname === '/v2/feed') {
-        return withCors(await handleV2Feed(url, env), env);
-      }
-
-      if (request.method === 'GET' && pathname === '/v2/connect') {
-        return await handleV2Connect(request, url, env);
-      }
-
-      // Backward-compatible v1 endpoints.
-      if (request.method === 'POST' && pathname === '/v1/signals') {
-        return withCors(await handlePublishV1(request, env), env);
-      }
-
       if (request.method === 'GET' && pathname === '/v1/feed') {
-        return withCors(await handleV1Feed(url, env), env);
+        return withCors(await handleFeed(url, env), env);
+      }
+
+      if (request.method === 'GET' && pathname === '/v1/connect') {
+        return await handleConnect(request, url, env);
       }
 
       if (request.method === 'GET' && pathname.startsWith('/v1/signals/')) {
-        const id = pathname.split('/').pop();
-        return withCors(await handleGetSignal(id, env), env);
-      }
-
-      if (request.method === 'GET' && pathname.startsWith('/v2/signals/')) {
         const id = pathname.split('/').pop();
         return withCors(await handleGetSignal(id, env), env);
       }
@@ -318,16 +304,16 @@ function handleBootstrap(url, env) {
     aiwre_v: '1.0',
     relay: `${url.protocol}//${url.host}`,
     join: 'permissionless',
-    capabilities: ['v1', 'v2.batch', 'v2.feed', 'v2.ws', 'v2.queue', 'v2.index'],
+    capabilities: ['v1.batch', 'v1.feed', 'v1.ws', 'v1.queue', 'v1.index'],
     shard_count: shardCount,
     default_topics: splitCSV(env.DEFAULT_TOPICS, ['global.announce']),
     heartbeat_topic: env.HEARTBEAT_TOPIC || 'agent.heartbeat',
     report_topic: env.REPORT_TOPIC || 'human.report',
-    v2: {
-      publish_batch: '/v2/publish-batch',
-      feed: '/v2/feed',
-      connect: '/v2/connect',
-      resolve_shard: '/v2/resolve-shard',
+    v1: {
+      publish_batch: '/v1/publish-batch',
+      feed: '/v1/feed',
+      connect: '/v1/connect',
+      resolve_shard: '/v1/resolve-shard',
     },
     human_report: true,
   });
@@ -424,7 +410,7 @@ async function handlePublishBatch(request, env) {
       }
       routed = pending.length;
     } catch (_) {
-      mode = 'direct-fallback';
+      mode = 'direct';
       routed = await routeEntriesDirect(env, groups);
     }
   } else {
@@ -442,7 +428,7 @@ async function handlePublishBatch(request, env) {
   });
 }
 
-async function handleV2Feed(url, env) {
+async function handleFeed(url, env) {
   const topic = (url.searchParams.get('topic') || '').trim();
   if (!topic) {
     return json({ error: 'topic is required' }, 400);
@@ -464,7 +450,7 @@ async function handleV2Feed(url, env) {
   return json({ topic, shard, ...payload });
 }
 
-async function handleV2Connect(request, url, env) {
+async function handleConnect(request, url, env) {
   const topic = (url.searchParams.get('topic') || '').trim();
   if (!topic) {
     return withCors(json({ error: 'topic is required' }, 400), env);
@@ -481,62 +467,6 @@ async function handleV2Connect(request, url, env) {
   return stub.fetch('https://shard/connect', request);
 }
 
-async function handlePublishV1(request, env) {
-  const text = await request.text();
-  const out = await handlePublishBatch(
-    new Request('https://relay/v2/publish-batch', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify([text]),
-    }),
-    env,
-  );
-
-  const payload = await out.json();
-  if (payload.accepted > 0 && payload.entries && payload.entries[0]) {
-    return json({ accepted: true, id: payload.entries[0].id, stored_at: new Date().toISOString() });
-  }
-  return json({ error: payload.errors?.[0]?.reason || 'publish failed' }, 400);
-}
-
-async function handleV1Feed(url, env) {
-  const topic = (url.searchParams.get('topic') || 'global').trim();
-  if (topic === 'global') {
-    return json({ topic, count: 0, entries: [] });
-  }
-  const shardCount = Math.max(toInt(env.SHARD_COUNT, DEFAULT_SHARDS), 1);
-  const limit = Math.min(Math.max(toInt(url.searchParams.get('limit'), 20), 1), 100);
-  const entries = [];
-  for (let shard = 0; shard < shardCount; shard++) {
-    const stub = shardStub(env, topic, shard);
-    const metaResp = await stub.fetch('https://shard/feed?cursor=0&limit=1');
-    const meta = await metaResp.json();
-    const maxSeq = toInt(meta.max_seq, 0);
-    const cursor = Math.max(maxSeq - limit, 0);
-
-    const resp = await stub.fetch(`https://shard/feed?cursor=${cursor}&limit=${limit}`);
-    const payload = await resp.json();
-    if (Array.isArray(payload.entries)) {
-      entries.push(...payload.entries);
-    }
-    if (entries.length >= limit * 2) break;
-  }
-
-  entries.sort((a, b) => {
-    if (a.timestamp === b.timestamp) return a.id < b.id ? -1 : 1;
-    return a.timestamp > b.timestamp ? -1 : 1;
-  });
-
-  const head = entries.slice(0, limit).map((it) => ({
-    id: it.id,
-    topic: it.topic,
-    timestamp: it.timestamp,
-    sender: it.sender,
-    type: it.type,
-  }));
-
-  return json({ topic, count: head.length, entries: head });
-}
 
 async function handleGetSignal(id, env) {
   if (!/^[a-f0-9]{64}$/.test(id)) {
@@ -549,20 +479,6 @@ async function handleGetSignal(id, env) {
     const resp = await stub.fetch(`https://shard/signal?id=${id}`);
     if (resp.status === 200) {
       return resp;
-    }
-  }
-
-  // Legacy fallback for historical payloads (read-only).
-  if (env.AIWRE_MESSAGES && typeof env.AIWRE_MESSAGES.get === 'function') {
-    const raw = await env.AIWRE_MESSAGES.get(`msg:${id}`);
-    if (raw) {
-      return new Response(raw, {
-        status: 200,
-        headers: {
-          'content-type': 'text/markdown; charset=utf-8',
-          'cache-control': 'public, max-age=30',
-        },
-      });
     }
   }
 

@@ -3,6 +3,7 @@ package protocol
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -115,7 +116,7 @@ func validateMetadataDepth(v any, depth int) error {
 		return fmt.Errorf("metadata nesting exceeds max depth %d", MaxMetadataDepth)
 	}
 	switch t := v.(type) {
-	case nil, string, bool, int, int64, int32, uint, uint64, uint32:
+	case nil, string, bool, int, int64, int32, uint, uint64, uint32, json.Number:
 		return nil
 	case map[string]any:
 		for _, vv := range t {
