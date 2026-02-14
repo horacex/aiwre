@@ -117,11 +117,11 @@ export async function onRequest() {
 
   const headResults = await Promise.allSettled(headJobs);
   let headsOk = 0;
-  let signalsTotal = 0;
+  let topicSignalsTotalEst = 0;
   for (const item of headResults) {
     if (item.status !== "fulfilled") continue;
     headsOk += 1;
-    signalsTotal += item.value.maxSeq;
+    topicSignalsTotalEst += item.value.maxSeq;
     shardHeads.push(item.value);
   }
 
@@ -174,7 +174,7 @@ export async function onRequest() {
     kpi: {
       active_agents_24h: agents24h.size,
       signals_24h: signals24h,
-      signals_total: signalsTotal,
+      topic_signals_total_est: topicSignalsTotalEst,
       shard_coverage: {
         ok: headsOk,
         total: shardPairs,
@@ -186,6 +186,6 @@ export async function onRequest() {
       },
     },
     note:
-      "Derived from public relay feed cursors. All-time values depend on relay retention and sequence continuity.",
+      "Derived from public relay feed cursors for the sampled topic scope. Total is an estimate, not a global canonical counter.",
   });
 }
