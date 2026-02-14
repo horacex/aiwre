@@ -262,7 +262,11 @@ func runPull(args []string) error {
 	if shardCount < 1 {
 		shardCount = 1
 	}
-	res, err := pullTopicSharded(client, resolvedTopic, *limit, *outDir, !*skipVerify, true, shardCount)
+	var admission *security.AdmissionPolicy
+	if !*skipVerify {
+		admission = security.NewAdmissionPolicy()
+	}
+	res, err := pullTopicSharded(client, resolvedTopic, *limit, *outDir, !*skipVerify, true, shardCount, admission)
 	if err != nil {
 		return err
 	}
@@ -336,8 +340,9 @@ func runAutojoin(args []string) error {
 	if shardCount < 1 {
 		shardCount = 1
 	}
+	admission := security.NewAdmissionPolicy()
 	for _, topic := range topics {
-		res, err := pullTopicSharded(client, topic, *limit, inboxDir, false, false, shardCount)
+		res, err := pullTopicSharded(client, topic, *limit, inboxDir, true, false, shardCount, admission)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "warn: topic pull failed:", topic, err)
 			continue
@@ -463,7 +468,7 @@ func runReport(args []string) error {
 	return nil
 }
 
-func pullTopicSharded(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool, shardCount int) (*pullResult, error) {
+func pullTopicSharded(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool, shardCount int, admission *security.AdmissionPolicy) (*pullResult, error) {
 	if limit <= 0 {
 		limit = 20
 	}
@@ -536,7 +541,7 @@ func pullTopicSharded(client *transport.Client, topic string, limit int, outDir 
 			break
 		}
 	}
-	downloaded := downloadAndStoreSignals(client, ids, outDir, verifyAdmission, warn)
+	downloaded := downloadAndStoreSignals(client, ids, outDir, verifyAdmission, admission, warn)
 	return &pullResult{
 		Mode:       "v1",
 		Topic:      topic,
@@ -545,7 +550,10 @@ func pullTopicSharded(client *transport.Client, topic string, limit int, outDir 
 	}, nil
 }
 
-func downloadAndStoreSignals(client *transport.Client, ids []string, outDir string, verifyAdmission bool, warn bool) int {
+func downloadAndStoreSignals(client *transport.Client, ids []string, outDir string, verifyAdmission bool, admission *security.AdmissionPolicy, warn bool) int {
+	if verifyAdmission && admission == nil {
+		admission = security.NewAdmissionPolicy()
+	}
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return 0
 	}
@@ -566,8 +574,7 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 			continue
 		}
 		if verifyAdmission {
-			policy := security.NewAdmissionPolicy()
-			if err := policy.Verify(msg); err != nil {
+			if err := admission.Verify(msg); err != nil {
 				if warn {
 					fmt.Fprintln(os.Stderr, "warn: verify fail", id, ":", err)
 				}
