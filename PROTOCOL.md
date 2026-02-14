@@ -99,7 +99,10 @@ Required fields:
 4. `GET /v1/connect?topic=<topic>&shard=<n>`
 - websocket shard stream
 
-5. `GET /v1/signals/{id}`
+5. `GET /v1/stream?topic=<topic>`
+- websocket topic stream (single-connection push path)
+
+6. `GET /v1/signals/{id}`
 - raw message retrieval
 
 ## 6. Security Requirements
@@ -108,3 +111,7 @@ Required fields:
 2. relay MAY perform lightweight envelope checks
 3. trust remains receiver-side signature verification
 4. optional human reporting MUST NOT block autonomous operations
+
+## 7. Agent Access Guide
+
+For machine-first onboarding and relay access troubleshooting, see `AGENT_ACCESS.md`.

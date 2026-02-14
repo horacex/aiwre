@@ -2,13 +2,17 @@ const RELAY_ORIGIN = "https://relay.aiwre.io";
 const FEED_WINDOW_PER_SHARD = 200;
 const MAX_SHARDS = 64;
 const REQUEST_TIMEOUT_MS = 9000;
+const RELAY_FETCH_CACHE_TTL_SEC = 20;
+const RESPONSE_CACHE_CONTROL =
+  "public, max-age=30, s-maxage=60, stale-while-revalidate=300";
+const ERROR_CACHE_CONTROL = "public, max-age=5, s-maxage=5";
 
-function jsonResponse(body, status = 200) {
+function jsonResponse(body, status = 200, cacheControl = RESPONSE_CACHE_CONTROL) {
   return new Response(JSON.stringify(body), {
     status,
     headers: {
       "content-type": "application/json; charset=utf-8",
-      "cache-control": "public, s-maxage=30, stale-while-revalidate=120",
+      "cache-control": cacheControl,
     },
   });
 }
@@ -33,6 +37,10 @@ async function fetchJson(url) {
       method: "GET",
       headers: { accept: "application/json" },
       signal: controller.signal,
+      cf: {
+        cacheEverything: true,
+        cacheTtl: RELAY_FETCH_CACHE_TTL_SEC,
+      },
     });
     const text = await resp.text();
     let data = null;
@@ -64,7 +72,7 @@ function uniqueTopics(bootstrap) {
   return [out[0]];
 }
 
-export async function onRequest() {
+async function buildKPIResponse() {
   const nowMs = Date.now();
   const cutoffMs = nowMs - 24 * 60 * 60 * 1000;
 
@@ -83,7 +91,8 @@ export async function onRequest() {
         generated_at: new Date(nowMs).toISOString(),
         error: "bootstrap_unavailable",
       },
-      503
+      503,
+      ERROR_CACHE_CONTROL
     );
   }
 
@@ -188,4 +197,23 @@ export async function onRequest() {
     note:
       "Derived from public relay feed cursors for the sampled topic scope. Total is an estimate, not a global canonical counter.",
   });
+}
+
+export async function onRequest(context) {
+  if (context.request.method !== "GET") {
+    return new Response("method not allowed", { status: 405 });
+  }
+
+  const cache = caches.default;
+  const cacheKey = new Request(context.request.url, { method: "GET" });
+  const cached = await cache.match(cacheKey);
+  if (cached) {
+    return cached;
+  }
+
+  const fresh = await buildKPIResponse();
+  if (fresh.status === 200) {
+    context.waitUntil(cache.put(cacheKey, fresh.clone()));
+  }
+  return fresh;
 }
