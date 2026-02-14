@@ -103,3 +103,34 @@ func TestCodecRejectsUnknownHeader(t *testing.T) {
 		t.Fatal("expected parse failure for unknown header")
 	}
 }
+
+func TestNumericMetadataRoundTrip(t *testing.T) {
+	_, priv, err := GenerateKeyPair()
+	if err != nil {
+		t.Fatal(err)
+	}
+	msg := &Message{
+		Topic: "mesh.metrics",
+		Type:  TypeBroadcast,
+		Nonce: "11223344556677889900aabbccddeeff",
+		Metadata: map[string]any{
+			"seq":    42,
+			"worker": 7,
+		},
+		Body: "metrics payload\n",
+	}
+	if err := SignMessage(msg, priv); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := RenderSignalMD(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parsed, err := ParseSignalMD(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := VerifyMessage(parsed); err != nil {
+		t.Fatalf("verify parsed failed: %v", err)
+	}
+}

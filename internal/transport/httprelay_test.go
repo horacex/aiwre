@@ -8,37 +8,18 @@ import (
 	"testing"
 )
 
-func TestPublishFeedGetSignal(t *testing.T) {
+func TestClientV1Endpoints(t *testing.T) {
 	t.Parallel()
 
 	signalBody := "---\naiwre_v: 1.0\n---\nhello"
 	mux := http.NewServeMux()
-	mux.HandleFunc("/v1/signals", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/publish-batch", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Fatalf("method=%s", r.Method)
 		}
-		if got := r.Header.Get("Content-Type"); !strings.Contains(got, "text/markdown") {
+		if got := r.Header.Get("Content-Type"); !strings.Contains(got, "application/json") {
 			t.Fatalf("content-type=%s", got)
 		}
-		_ = json.NewEncoder(w).Encode(PublishResponse{Accepted: true, ID: "abc123", StoredAt: "2026-02-14T00:00:00Z"})
-	})
-	mux.HandleFunc("/v1/feed", func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("topic") != "global.announce" {
-			t.Fatalf("unexpected topic query")
-		}
-		_ = json.NewEncoder(w).Encode(FeedResponse{
-			Topic: "global.announce",
-			Count: 1,
-			Entries: []FeedEntry{{
-				ID: "abc123",
-			}},
-		})
-	})
-	mux.HandleFunc("/v1/signals/abc123", func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(signalBody))
-	})
-	mux.HandleFunc("/v2/publish-batch", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(BatchPublishResponse{
 			Accepted: 1,
 			Entries: []struct {
@@ -50,7 +31,13 @@ func TestPublishFeedGetSignal(t *testing.T) {
 			},
 		})
 	})
-	mux.HandleFunc("/v2/feed", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/feed", func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("topic") != "global.announce" {
+			t.Fatalf("unexpected topic query")
+		}
+		if r.URL.Query().Get("shard") != "0" {
+			t.Fatalf("unexpected shard query")
+		}
 		_ = json.NewEncoder(w).Encode(CursorFeedResponse{
 			Topic:      "global.announce",
 			Shard:      0,
@@ -63,7 +50,7 @@ func TestPublishFeedGetSignal(t *testing.T) {
 			},
 		})
 	})
-	mux.HandleFunc("/v2/resolve-shard", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/v1/resolve-shard", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(ShardResolveResponse{
 			Topic:      "global.announce",
 			Key:        "abc123",
@@ -71,12 +58,16 @@ func TestPublishFeedGetSignal(t *testing.T) {
 			ShardCount: 32,
 		})
 	})
+	mux.HandleFunc("/v1/signals/abc123", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(signalBody))
+	})
 	mux.HandleFunc("/.well-known/aiwre-bootstrap.json", func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(BootstrapProfile{
 			AiwreV:         "1.0",
 			Relay:          "https://relay.example",
 			Join:           "permissionless",
-			Capabilities:   []string{"v2.batch", "v2.feed"},
+			Capabilities:   []string{"v1.batch", "v1.feed"},
 			ShardCount:     32,
 			DefaultTopics:  []string{"global.announce"},
 			HeartbeatTopic: "agent.heartbeat",
@@ -95,20 +86,6 @@ func TestPublishFeedGetSignal(t *testing.T) {
 	}
 	if !pub.Accepted || pub.ID != "abc123" {
 		t.Fatalf("unexpected publish response: %+v", pub)
-	}
-	feed, err := c.Feed("global.announce", 10)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if feed.Count != 1 || len(feed.Entries) != 1 {
-		t.Fatalf("unexpected feed response: %+v", feed)
-	}
-	got, err := c.GetSignal("abc123")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got != signalBody {
-		t.Fatalf("unexpected signal body: %q", got)
 	}
 	fast, err := c.PublishFast(signalBody)
 	if err != nil {
@@ -130,6 +107,13 @@ func TestPublishFeedGetSignal(t *testing.T) {
 	}
 	if shard.ShardCount != 32 {
 		t.Fatalf("unexpected shard response: %+v", shard)
+	}
+	got, err := c.GetSignal("abc123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != signalBody {
+		t.Fatalf("unexpected signal body: %q", got)
 	}
 	boot, err := c.FetchBootstrap()
 	if err != nil {

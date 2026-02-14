@@ -246,7 +246,23 @@ func runPull(args []string) error {
 		return errors.New("--relay is required")
 	}
 	client := transport.NewClient(*relay)
-	res, err := pullTopicAdaptive(client, *topic, *limit, *outDir, !*skipVerify, true)
+	profile, err := client.FetchBootstrap()
+	if err != nil {
+		return err
+	}
+	resolvedTopic := strings.TrimSpace(*topic)
+	if resolvedTopic == "" {
+		if len(profile.DefaultTopics) > 0 {
+			resolvedTopic = profile.DefaultTopics[0]
+		} else {
+			resolvedTopic = "global.announce"
+		}
+	}
+	shardCount := profile.ShardCount
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	res, err := pullTopicSharded(client, resolvedTopic, *limit, *outDir, !*skipVerify, true, shardCount)
 	if err != nil {
 		return err
 	}
@@ -316,8 +332,12 @@ func runAutojoin(args []string) error {
 	}
 	inboxDir := filepath.Join(*stateDir, "inbox")
 	totalDownloaded := 0
+	shardCount := profile.ShardCount
+	if shardCount < 1 {
+		shardCount = 1
+	}
 	for _, topic := range topics {
-		res, err := pullTopicAdaptive(client, topic, *limit, inboxDir, false, false)
+		res, err := pullTopicSharded(client, topic, *limit, inboxDir, false, false, shardCount)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "warn: topic pull failed:", topic, err)
 			continue
@@ -443,49 +463,12 @@ func runReport(args []string) error {
 	return nil
 }
 
-func pullTopic(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool) (*transport.FeedResponse, int, error) {
-	feed, err := client.Feed(topic, limit)
-	if err != nil {
-		return nil, 0, err
-	}
-	ids := make([]string, 0, len(feed.Entries))
-	for _, e := range feed.Entries {
-		ids = append(ids, e.ID)
-	}
-	sort.Strings(ids)
-	downloaded := downloadAndStoreSignals(client, ids, outDir, verifyAdmission, warn)
-	return feed, downloaded, nil
-}
-
-func pullTopicAdaptive(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool) (*pullResult, error) {
-	if topic != "" {
-		boot, err := client.FetchBootstrap()
-		if err == nil && boot != nil && boot.ShardCount > 0 {
-			res, v2err := pullTopicV2(client, topic, limit, outDir, verifyAdmission, warn, boot.ShardCount)
-			if v2err == nil {
-				return res, nil
-			}
-			if warn {
-				fmt.Fprintln(os.Stderr, "warn: v2 pull failed, fallback to v1:", v2err)
-			}
-		}
-	}
-
-	feed, downloaded, err := pullTopic(client, topic, limit, outDir, verifyAdmission, warn)
-	if err != nil {
-		return nil, err
-	}
-	return &pullResult{
-		Mode:       "v1",
-		Topic:      feed.Topic,
-		Count:      feed.Count,
-		Downloaded: downloaded,
-	}, nil
-}
-
-func pullTopicV2(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool, shardCount int) (*pullResult, error) {
+func pullTopicSharded(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool, shardCount int) (*pullResult, error) {
 	if limit <= 0 {
 		limit = 20
+	}
+	if shardCount < 1 {
+		shardCount = 1
 	}
 	perShard := (limit + shardCount - 1) / shardCount
 	if perShard < 1 {
@@ -502,8 +485,6 @@ func pullTopicV2(client *transport.Client, topic string, limit int, outDir strin
 		wg.Add(1)
 		go func(s int) {
 			defer wg.Done()
-			// First probe max_seq, then pull from tail window instead of
-			// cursor=0 (which returns oldest entries and misses fresh traffic).
 			meta, err := client.FeedCursor(topic, s, 0, 1)
 			if err != nil {
 				results <- shardResult{resp: nil, err: err}
@@ -529,7 +510,7 @@ func pullTopicV2(client *transport.Client, topic string, limit int, outDir strin
 	}
 	if len(entries) == 0 {
 		return &pullResult{
-			Mode:       "v2",
+			Mode:       "v1",
 			Topic:      topic,
 			Count:      0,
 			Downloaded: 0,
@@ -557,7 +538,7 @@ func pullTopicV2(client *transport.Client, topic string, limit int, outDir strin
 	}
 	downloaded := downloadAndStoreSignals(client, ids, outDir, verifyAdmission, warn)
 	return &pullResult{
-		Mode:       "v2",
+		Mode:       "v1",
 		Topic:      topic,
 		Count:      len(ids),
 		Downloaded: downloaded,
@@ -570,7 +551,7 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 	}
 	downloaded := 0
 	for _, id := range ids {
-		signal, err := client.GetSignal(id)
+		signal, err := getSignalWithRetry(client, id, 4, 250*time.Millisecond)
 		if err != nil {
 			if warn {
 				fmt.Fprintln(os.Stderr, "warn: skip", id, ":", err)
@@ -608,6 +589,24 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 		downloaded++
 	}
 	return downloaded
+}
+
+func getSignalWithRetry(client *transport.Client, id string, attempts int, wait time.Duration) (string, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	var lastErr error
+	for i := 0; i < attempts; i++ {
+		signal, err := client.GetSignal(id)
+		if err == nil {
+			return signal, nil
+		}
+		lastErr = err
+		if i < attempts-1 {
+			time.Sleep(wait)
+		}
+	}
+	return "", lastErr
 }
 
 func resolveBootstrap(raw string) (string, *transport.BootstrapProfile, error) {

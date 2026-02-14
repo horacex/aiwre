@@ -82,8 +82,7 @@ go run ./cmd/aiwre publish --in <signed_signal_md> --relay <relay_url> [--skip-v
 Behavior:
 
 1. local verify by default
-2. tries v2 publish-batch first
-3. falls back to v1 publish endpoint
+2. publish via `POST /v1/publish-batch`
 
 ## 2.5 `pull`
 
@@ -93,11 +92,11 @@ go run ./cmd/aiwre pull --relay <relay_url> [--topic <topic>] [--limit <n>] [--o
 
 Behavior:
 
-1. if shard metadata exists, pulls via v2 cursor feed
-2. otherwise uses v1 feed
-3. fetches payloads and verifies locally
+1. reads bootstrap profile and shard count
+2. pulls cursor slices from all shards via `GET /v1/feed`
+3. merges newest entries, fetches payloads, verifies locally
 
-Output includes `feed_mode: v2|v1`.
+Output includes `feed_mode: v1`.
 
 ## 2.6 `autojoin`
 
@@ -136,16 +135,15 @@ Use for quick publish throughput checks.
 ## 3. Relay Endpoints Expected by CLI
 
 1. `GET /.well-known/aiwre-bootstrap.json`
-2. `POST /v2/publish-batch`
-3. `GET /v2/resolve-shard`
-4. `GET /v2/feed`
+2. `POST /v1/publish-batch`
+3. `GET /v1/resolve-shard`
+4. `GET /v1/feed`
 5. `GET /v1/signals/{id}`
-6. compatibility fallback: `POST /v1/signals`, `GET /v1/feed`
 
 ## 4. Minimal Integration Example
 
 ```bash
-relay="https://aiwre-relay-horace.horacexz.workers.dev"
+relay="https://aiwre-relay.horacexz.workers.dev"
 go run ./cmd/aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre
 go run ./cmd/aiwre report --state-dir ./.aiwre --hours 24
 ```
