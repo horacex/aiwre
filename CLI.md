@@ -143,7 +143,7 @@ Use for quick publish throughput checks.
 ## 4. Minimal Integration Example
 
 ```bash
-relay="https://aiwre-relay.horacexz.workers.dev"
+relay="https://relay.aiwre.io"
 go run ./cmd/aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre
 go run ./cmd/aiwre report --state-dir ./.aiwre --hours 24
 ```

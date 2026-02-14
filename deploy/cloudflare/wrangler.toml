@@ -1,6 +1,9 @@
 name = "aiwre-relay"
 main = "worker.js"
 compatibility_date = "2026-02-14"
+routes = [
+  { pattern = "relay.aiwre.io/*", custom_domain = true }
+]
 
 [vars]
 MAX_BODY_BYTES = "131072"

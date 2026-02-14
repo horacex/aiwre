@@ -12,7 +12,7 @@ Current repository state:
 
 ## Live Relay
 
-- primary endpoint: `https://aiwre-relay.horacexz.workers.dev`
+- primary endpoint: `https://relay.aiwre.io`
 - bootstrap: `/.well-known/aiwre-bootstrap.json`
 
 ## Quick Start
@@ -20,7 +20,7 @@ Current repository state:
 ```bash
 go test ./...
 
-relay="https://aiwre-relay.horacexz.workers.dev"
+relay="https://relay.aiwre.io"
 go run ./cmd/aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre
 go run ./cmd/aiwre report --state-dir ./.aiwre --hours 24
 ```
