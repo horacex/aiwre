@@ -2,6 +2,7 @@ const DEFAULT_SHARDS = 32;
 const DEFAULT_BATCH_MAX = 100;
 const DEFAULT_SHARD_RETENTION = 5000;
 const DEFAULT_QUEUE_BATCH_MAX = 100;
+const QUEUE_SAFE_BODY_MAX = 96 * 1024;
 
 export default {
   async fetch(request, env) {
@@ -14,7 +15,7 @@ export default {
 
     try {
       if (request.method === 'GET' && pathname === '/health') {
-        return withCors(json({ ok: true, service: 'aiwre-relay', version: 'v2' }), env);
+        return withCors(json({ ok: true, service: 'aiwre-relay', version: 'v2.2' }), env);
       }
 
       if (request.method === 'GET' && pathname === '/.well-known/aiwre-bootstrap.json') {
@@ -80,7 +81,7 @@ export default {
       if (!groups.has(groupKey)) {
         groups.set(groupKey, { topic: signal.topic, shard, entries: [] });
       }
-      groups.get(groupKey).entries.push(signal);
+      groups.get(groupKey).entries.push({ ...signal, shard });
     }
 
     try {
@@ -115,6 +116,10 @@ export class TopicShardDO {
       return this.handleFeed(url);
     }
 
+    if (request.method === 'GET' && pathname === '/signal') {
+      return this.handleSignal(url);
+    }
+
     if (request.method === 'GET' && pathname === '/connect') {
       return this.handleConnect(request);
     }
@@ -133,11 +138,15 @@ export class TopicShardDO {
     const retention = Math.max(toInt(this.env.SHARD_RETENTION, DEFAULT_SHARD_RETENTION), 1000);
     let accepted = 0;
     for (const entry of entries) {
+      if (!entry || typeof entry !== 'object' || !entry.id || !entry.topic) {
+        continue;
+      }
       const dedupeKey = `id:${entry.id}`;
       const exists = await this.state.storage.get(dedupeKey);
       if (exists) {
         continue;
       }
+
       seq += 1;
       const row = {
         seq,
@@ -147,14 +156,23 @@ export class TopicShardDO {
         type: entry.type,
         timestamp: entry.timestamp,
       };
+
       await this.state.storage.put(`e:${seq}`, row);
       await this.state.storage.put(dedupeKey, seq);
+      if (typeof entry.raw === 'string' && entry.raw.length > 0) {
+        await this.state.storage.put(`m:${entry.id}`, entry.raw);
+      }
       accepted += 1;
       this.broadcast({ type: 'signal', entry: row });
 
-      const minSeq = seq - retention;
-      if (minSeq > 0) {
-        await this.state.storage.delete(`e:${minSeq}`);
+      const evictSeq = seq - retention;
+      if (evictSeq > 0) {
+        const oldRow = await this.state.storage.get(`e:${evictSeq}`);
+        if (oldRow && oldRow.id) {
+          await this.state.storage.delete(`m:${oldRow.id}`);
+          await this.state.storage.delete(`id:${oldRow.id}`);
+        }
+        await this.state.storage.delete(`e:${evictSeq}`);
       }
     }
     await this.state.storage.put('seq', seq);
@@ -175,6 +193,24 @@ export class TopicShardDO {
     }
 
     return json({ cursor, next_cursor: end, max_seq: seq, count: entries.length, entries });
+  }
+
+  async handleSignal(url) {
+    const id = (url.searchParams.get('id') || '').trim();
+    if (!/^[a-f0-9]{64}$/.test(id)) {
+      return json({ error: 'invalid id' }, 400);
+    }
+    const raw = await this.state.storage.get(`m:${id}`);
+    if (!raw) {
+      return json({ error: 'not found' }, 404);
+    }
+    return new Response(raw, {
+      status: 200,
+      headers: {
+        'content-type': 'text/markdown; charset=utf-8',
+        'cache-control': 'public, max-age=30',
+      },
+    });
   }
 
   async handleConnect(request) {
@@ -218,13 +254,71 @@ export class TopicShardDO {
   }
 }
 
+export class MessageIndexDO {
+  constructor(state, env) {
+    this.state = state;
+    this.env = env;
+  }
+
+  async fetch(request) {
+    const url = new URL(request.url);
+    const pathname = url.pathname;
+
+    if (request.method === 'POST' && pathname === '/upsert') {
+      return this.handleUpsert(request);
+    }
+
+    if (request.method === 'GET' && pathname === '/lookup') {
+      return this.handleLookup(url);
+    }
+
+    return json({ error: 'not found' }, 404);
+  }
+
+  async handleUpsert(request) {
+    const payload = await request.json();
+    const entries = Array.isArray(payload.entries) ? payload.entries : [];
+    let updated = 0;
+    for (const entry of entries) {
+      if (!entry || typeof entry !== 'object') continue;
+      const id = String(entry.id || '');
+      const topic = String(entry.topic || '');
+      const shard = toInt(entry.shard, -1);
+      if (!/^[a-f0-9]{64}$/.test(id)) continue;
+      if (!/^[a-z0-9]+(\.[a-z0-9_-]+)+$/.test(topic)) continue;
+      if (shard < 0) continue;
+      await this.state.storage.put(`i:${id}`, {
+        id,
+        topic,
+        shard,
+        timestamp: entry.timestamp || '',
+        updated_at: new Date().toISOString(),
+      });
+      updated++;
+    }
+    return json({ updated });
+  }
+
+  async handleLookup(url) {
+    const id = (url.searchParams.get('id') || '').trim();
+    if (!/^[a-f0-9]{64}$/.test(id)) {
+      return json({ error: 'invalid id' }, 400);
+    }
+    const row = await this.state.storage.get(`i:${id}`);
+    if (!row) {
+      return json({ error: 'not found' }, 404);
+    }
+    return json(row);
+  }
+}
+
 function handleBootstrap(url, env) {
   const shardCount = Math.max(toInt(env.SHARD_COUNT, DEFAULT_SHARDS), 1);
   return json({
     aiwre_v: '1.0',
     relay: `${url.protocol}//${url.host}`,
     join: 'permissionless',
-    capabilities: ['v1', 'v2.batch', 'v2.feed', 'v2.ws', 'v2.queue'],
+    capabilities: ['v1', 'v2.batch', 'v2.feed', 'v2.ws', 'v2.queue', 'v2.index'],
     shard_count: shardCount,
     default_topics: splitCSV(env.DEFAULT_TOPICS, ['global.announce']),
     heartbeat_topic: env.HEARTBEAT_TOPIC || 'agent.heartbeat',
@@ -255,7 +349,10 @@ function handleResolveShard(url, env) {
 
 async function handlePublishBatch(request, env) {
   const maxBatch = Math.max(toInt(env.BATCH_MAX, DEFAULT_BATCH_MAX), 1);
-  const maxBytes = Math.max(toInt(env.MAX_BODY_BYTES, 128 * 1024), 4096);
+  let maxBytes = Math.max(toInt(env.MAX_BODY_BYTES, 128 * 1024), 4096);
+  if (env.AIWRE_INGRESS && typeof env.AIWRE_INGRESS.sendBatch === 'function') {
+    maxBytes = Math.min(maxBytes, QUEUE_SAFE_BODY_MAX);
+  }
 
   let signals = [];
   const ct = request.headers.get('content-type') || '';
@@ -263,7 +360,7 @@ async function handlePublishBatch(request, env) {
     const body = await request.json();
     if (Array.isArray(body)) {
       signals = body;
-    } else if (Array.isArray(body.signals)) {
+    } else if (body && Array.isArray(body.signals)) {
       signals = body.signals;
     }
   } else {
@@ -299,13 +396,7 @@ async function handlePublishBatch(request, env) {
       continue;
     }
 
-    const signal = parsed.signal;
-    const msgKey = `msg:${signal.id}`;
-    const exists = await env.AIWRE_MESSAGES.get(msgKey);
-    if (!exists) {
-      await env.AIWRE_MESSAGES.put(msgKey, rawSignal, { expirationTtl: Math.min(signal.ttl, 86400) });
-    }
-
+    const signal = { ...parsed.signal, raw: rawSignal };
     const shard = shardFor(signal.topic, signal.id, shardCount);
     const groupKey = `${signal.topic}:${shard}`;
     if (!groups.has(groupKey)) {
@@ -317,19 +408,25 @@ async function handlePublishBatch(request, env) {
 
   let routed = 0;
   let mode = 'direct';
+
   if (accepted.length > 0 && env.AIWRE_INGRESS && typeof env.AIWRE_INGRESS.sendBatch === 'function') {
-    mode = 'queued';
-    const queueBatch = Math.max(toInt(env.QUEUE_BATCH_MAX, DEFAULT_QUEUE_BATCH_MAX), 1);
-    const pending = [];
-    for (const group of groups.values()) {
-      for (const entry of group.entries) {
-        pending.push({ body: entry });
+    try {
+      mode = 'queued';
+      const queueBatch = Math.max(toInt(env.QUEUE_BATCH_MAX, DEFAULT_QUEUE_BATCH_MAX), 1);
+      const pending = [];
+      for (const group of groups.values()) {
+        for (const entry of group.entries) {
+          pending.push({ body: entry });
+        }
       }
+      for (let i = 0; i < pending.length; i += queueBatch) {
+        await env.AIWRE_INGRESS.sendBatch(pending.slice(i, i + queueBatch));
+      }
+      routed = pending.length;
+    } catch (_) {
+      mode = 'direct-fallback';
+      routed = await routeEntriesDirect(env, groups);
     }
-    for (let i = 0; i < pending.length; i += queueBatch) {
-      await env.AIWRE_INGRESS.sendBatch(pending.slice(i, i + queueBatch));
-    }
-    routed = pending.length;
   } else {
     routed = await routeEntriesDirect(env, groups);
   }
@@ -445,17 +542,31 @@ async function handleGetSignal(id, env) {
   if (!/^[a-f0-9]{64}$/.test(id)) {
     return json({ error: 'invalid id' }, 400);
   }
-  const raw = await env.AIWRE_MESSAGES.get(`msg:${id}`);
-  if (!raw) {
-    return json({ error: 'not found' }, 404);
+
+  const mapping = await lookupIndex(env, id);
+  if (mapping && mapping.topic && Number.isInteger(mapping.shard)) {
+    const stub = shardStub(env, mapping.topic, mapping.shard);
+    const resp = await stub.fetch(`https://shard/signal?id=${id}`);
+    if (resp.status === 200) {
+      return resp;
+    }
   }
-  return new Response(raw, {
-    status: 200,
-    headers: {
-      'content-type': 'text/markdown; charset=utf-8',
-      'cache-control': 'public, max-age=30',
-    },
-  });
+
+  // Legacy fallback for historical payloads (read-only).
+  if (env.AIWRE_MESSAGES && typeof env.AIWRE_MESSAGES.get === 'function') {
+    const raw = await env.AIWRE_MESSAGES.get(`msg:${id}`);
+    if (raw) {
+      return new Response(raw, {
+        status: 200,
+        headers: {
+          'content-type': 'text/markdown; charset=utf-8',
+          'cache-control': 'public, max-age=30',
+        },
+      });
+    }
+  }
+
+  return json({ error: 'not found' }, 404);
 }
 
 async function routeEntriesDirect(env, groups) {
@@ -470,9 +581,50 @@ async function routeEntriesDirect(env, groups) {
     if (!resp.ok) {
       throw new Error(`shard publish failed: ${group.topic}:${group.shard}`);
     }
+    await upsertIndexBatch(env, group.entries);
     routed += group.entries.length;
   }
   return routed;
+}
+
+async function upsertIndexBatch(env, entries) {
+  const buckets = new Map();
+  for (const entry of entries) {
+    if (!entry || !entry.id) continue;
+    const prefix = entry.id.slice(0, 2);
+    if (!buckets.has(prefix)) {
+      buckets.set(prefix, []);
+    }
+    buckets.get(prefix).push({
+      id: entry.id,
+      topic: entry.topic,
+      shard: entry.shard,
+      timestamp: entry.timestamp,
+    });
+  }
+
+  for (const [prefix, list] of buckets.entries()) {
+    const stub = indexStub(env, prefix);
+    const resp = await stub.fetch('https://index/upsert', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ entries: list }),
+    });
+    if (!resp.ok) {
+      throw new Error(`index upsert failed for prefix ${prefix}`);
+    }
+  }
+}
+
+async function lookupIndex(env, id) {
+  if (!env.MESSAGE_INDEX) return null;
+  const stub = indexStub(env, id.slice(0, 2));
+  const resp = await stub.fetch(`https://index/lookup?id=${id}`);
+  if (resp.status === 404) return null;
+  if (!resp.ok) {
+    throw new Error('index lookup failed');
+  }
+  return await resp.json();
 }
 
 function shardStub(env, topic, shard) {
@@ -480,15 +632,23 @@ function shardStub(env, topic, shard) {
   return env.TOPIC_SHARD.get(id);
 }
 
+function indexStub(env, prefix) {
+  const id = env.MESSAGE_INDEX.idFromName(prefix);
+  return env.MESSAGE_INDEX.get(id);
+}
+
 function normalizeQueuedSignal(body) {
   if (!body || typeof body !== 'object') return null;
-  if (!body.id || !body.topic || !body.sender || !body.type || !body.timestamp) return null;
+  if (!body.id || !body.topic || !body.sender || !body.type || !body.timestamp || typeof body.raw !== 'string') {
+    return null;
+  }
   return {
     id: String(body.id),
     topic: String(body.topic),
     sender: String(body.sender),
     type: String(body.type),
     timestamp: String(body.timestamp),
+    raw: String(body.raw),
     shard: Number.isInteger(body.shard) ? body.shard : undefined,
   };
 }
@@ -593,9 +753,10 @@ function json(payload, status = 200) {
 }
 
 function withCors(response, env) {
+  const out = new Response(response.body, response);
   const origin = env.CORS_ORIGIN || '*';
-  response.headers.set('access-control-allow-origin', origin);
-  response.headers.set('access-control-allow-methods', 'GET,POST,OPTIONS');
-  response.headers.set('access-control-allow-headers', 'content-type');
-  return response;
+  out.headers.set('access-control-allow-origin', origin);
+  out.headers.set('access-control-allow-methods', 'GET,POST,OPTIONS');
+  out.headers.set('access-control-allow-headers', 'content-type');
+  return out;
 }

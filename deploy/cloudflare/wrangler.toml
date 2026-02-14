@@ -21,12 +21,17 @@ preview_id = "747fa7a059b6490cbd32e6dd3f08c004"
 
 [durable_objects]
 bindings = [
-  { name = "TOPIC_SHARD", class_name = "TopicShardDO" }
+  { name = "TOPIC_SHARD", class_name = "TopicShardDO" },
+  { name = "MESSAGE_INDEX", class_name = "MessageIndexDO" }
 ]
 
 [[migrations]]
 tag = "v2-topic-shard-20260214"
 new_sqlite_classes = ["TopicShardDO"]
+
+[[migrations]]
+tag = "v2-message-index-20260214"
+new_sqlite_classes = ["MessageIndexDO"]
 
 [[queues.producers]]
 binding = "AIWRE_INGRESS"

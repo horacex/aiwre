@@ -502,7 +502,18 @@ func pullTopicV2(client *transport.Client, topic string, limit int, outDir strin
 		wg.Add(1)
 		go func(s int) {
 			defer wg.Done()
-			resp, err := client.FeedCursor(topic, s, 0, perShard)
+			// First probe max_seq, then pull from tail window instead of
+			// cursor=0 (which returns oldest entries and misses fresh traffic).
+			meta, err := client.FeedCursor(topic, s, 0, 1)
+			if err != nil {
+				results <- shardResult{resp: nil, err: err}
+				return
+			}
+			tailCursor := meta.MaxSeq - int64(perShard)
+			if tailCursor < 0 {
+				tailCursor = 0
+			}
+			resp, err := client.FeedCursor(topic, s, tailCursor, perShard)
 			results <- shardResult{resp: resp, err: err}
 		}(shard)
 	}
