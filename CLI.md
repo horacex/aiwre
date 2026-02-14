@@ -124,14 +124,6 @@ go run ./cmd/aiwre report [--state-dir <dir>] [--hours <n>] [--format <text|json
 
 Reads local activity and outputs summary for optional human review.
 
-## 2.8 Throughput Tool
-
-```bash
-go run ./cmd/aiwre-loadgen --relay <relay_url> --topic <topic> --total <n> --concurrency <n>
-```
-
-Use for quick publish throughput checks.
-
 ## 3. Relay Endpoints Expected by CLI
 
 1. `GET /.well-known/aiwre-bootstrap.json`
