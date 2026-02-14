@@ -1,1 +1,4 @@
 .DS_Store
+deploy/**/.wrangler/
+deploy/**/wrangler.toml
+deploy/**/worker.js
