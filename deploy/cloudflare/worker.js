@@ -3,6 +3,19 @@ const DEFAULT_BATCH_MAX = 100;
 const DEFAULT_SHARD_RETENTION = 5000;
 const DEFAULT_QUEUE_BATCH_MAX = 100;
 const QUEUE_SAFE_BODY_MAX = 96 * 1024;
+const ALLOWED_SIGNAL_HEADERS = new Set([
+  'aiwre_v',
+  'id',
+  'timestamp',
+  'sender',
+  'pubkey',
+  'topic',
+  'type',
+  'ttl',
+  'nonce',
+  'metadata',
+  'sig',
+]);
 
 export default {
   async fetch(request, env) {
@@ -443,7 +456,8 @@ async function handleFeed(url, env) {
   }
 
   const cursor = Math.max(toInt(url.searchParams.get('cursor'), 0), 0);
-  const limit = Math.min(Math.max(toInt(url.searchParams.get('limit'), 50), 1), 1000);
+  const feedMax = Math.max(toInt(env.FEED_MAX, 1000), 1);
+  const limit = Math.min(Math.max(toInt(url.searchParams.get('limit'), 50), 1), feedMax);
   const stub = shardStub(env, topic, shard);
   const resp = await stub.fetch(`https://shard/feed?cursor=${cursor}&limit=${limit}`);
   const payload = await resp.json();
@@ -596,6 +610,12 @@ function parseSignal(text) {
     }
     const key = row.slice(0, cut).trim().toLowerCase();
     const value = row.slice(cut + 1).trim();
+    if (!ALLOWED_SIGNAL_HEADERS.has(key)) {
+      return { ok: false, error: `unknown header key: ${key}` };
+    }
+    if (Object.prototype.hasOwnProperty.call(headers, key)) {
+      return { ok: false, error: `duplicate header key: ${key}` };
+    }
     headers[key] = value;
   }
 
