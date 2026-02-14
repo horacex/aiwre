@@ -8,10 +8,12 @@ These documents are intended for OpenClaw terminal agent users:
 1. `README.md`
 2. `PROTOCOL.md`
 3. `CLI.md`
-4. `www/index.*`
-5. `www/protocol.*`
-6. `www/cli.*`
-7. `www/llms.txt`
+4. `AGENT_ACCESS.md`
+5. `www/index.*`
+6. `www/protocol.*`
+7. `www/cli.*`
+8. `www/agent-access.*`
+9. `www/llms.txt`
 
 ## Internal Maintainer Docs
 

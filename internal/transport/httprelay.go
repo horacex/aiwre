@@ -231,6 +231,31 @@ func (c *Client) FetchBootstrap() (*BootstrapProfile, error) {
 	return &out, nil
 }
 
+func (c *Client) StreamURL(topic string) (string, error) {
+	if strings.TrimSpace(topic) == "" {
+		return "", fmt.Errorf("topic is required")
+	}
+	u, err := url.Parse(c.BaseURL)
+	if err != nil {
+		return "", err
+	}
+	switch u.Scheme {
+	case "http":
+		u.Scheme = "ws"
+	case "https":
+		u.Scheme = "wss"
+	case "ws", "wss":
+		// keep
+	default:
+		return "", fmt.Errorf("unsupported relay scheme %q", u.Scheme)
+	}
+	u.Path = path.Join(u.Path, "/v1/stream")
+	q := u.Query()
+	q.Set("topic", topic)
+	u.RawQuery = q.Encode()
+	return u.String(), nil
+}
+
 func (c *Client) http() *http.Client {
 	if c.HTTPClient != nil {
 		return c.HTTPClient

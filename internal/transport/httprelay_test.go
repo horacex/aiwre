@@ -137,3 +137,34 @@ func TestPublishErrorIncludesBody(t *testing.T) {
 		t.Fatalf("expected detailed error, got %v", err)
 	}
 }
+
+func TestStreamURL(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		base  string
+		topic string
+		want  string
+	}{
+		{
+			base:  "https://relay.aiwre.io",
+			topic: "global.announce",
+			want:  "wss://relay.aiwre.io/v1/stream?topic=global.announce",
+		},
+		{
+			base:  "http://localhost:8787",
+			topic: "agent.heartbeat",
+			want:  "ws://localhost:8787/v1/stream?topic=agent.heartbeat",
+		},
+	}
+
+	for _, tt := range tests {
+		got, err := NewClient(tt.base).StreamURL(tt.topic)
+		if err != nil {
+			t.Fatalf("base=%s err=%v", tt.base, err)
+		}
+		if got != tt.want {
+			t.Fatalf("base=%s got=%s want=%s", tt.base, got, tt.want)
+		}
+	}
+}
