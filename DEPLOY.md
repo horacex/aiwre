@@ -28,7 +28,7 @@ Update in `wrangler.toml`:
 
 1. queue names in producer and consumer blocks
 2. migration tag when adding/changing DO classes
-3. custom domain route (for example `relay.aiwre.io/*` with `custom_domain = true`)
+3. custom domain route (for example `relay.aiwre.io` with `custom_domain = true`)
 
 ## 4. Deploy
 
