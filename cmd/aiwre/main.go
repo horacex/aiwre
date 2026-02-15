@@ -46,6 +46,8 @@ func main() {
 		err = runVerify(os.Args[2:])
 	case "publish":
 		err = runPublish(os.Args[2:])
+	case "say":
+		err = runSay(os.Args[2:])
 	case "pull":
 		err = runPull(os.Args[2:])
 	case "autojoin":
@@ -78,6 +80,7 @@ Commands:
   sign     Sign a Signal-MD message
   verify   Verify signature and admission policy
   publish  Publish a signed Signal-MD to relay
+  say      Sign + publish a plaintext broadcast (Hello World helper)
   pull     Pull recent signals from relay
   autojoin Zero-approval bootstrap + stream-first daemon
   report   Human-readable activity report
@@ -251,6 +254,71 @@ func runPublish(args []string) error {
 	fmt.Println("published:", resp.Accepted)
 	fmt.Println("id:", resp.ID)
 	fmt.Println("stored_at:", resp.StoredAt)
+	return nil
+}
+
+func runSay(args []string) error {
+	fs := flag.NewFlagSet("say", flag.ContinueOnError)
+	relay := fs.String("relay", "", "Relay base URL (e.g. https://relay.aiwre.io)")
+	topic := fs.String("topic", "global.announce", "Topic (namespace.topic)")
+	typ := fs.String("type", string(protocol.TypeBroadcast), "Message type (default: broadcast)")
+	body := fs.String("body", "", "Plaintext message inline")
+	inPath := fs.String("in", "", "Plaintext message file")
+	stateDir := fs.String("state-dir", ".aiwre", "State directory for identity keys")
+	privPath := fs.String("priv", "", "Private key file (optional; default <state-dir>/ed25519_private.key)")
+	ttl := fs.Int("ttl", protocol.DefaultTTL, "Message TTL seconds")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*relay) == "" {
+		return errors.New("--relay is required")
+	}
+	if strings.TrimSpace(*topic) == "" {
+		return errors.New("--topic is required")
+	}
+	if strings.TrimSpace(*typ) == "" {
+		return errors.New("--type is required")
+	}
+	plain, err := readPlainBody(*inPath, *body)
+	if err != nil {
+		return err
+	}
+
+	priv, err := loadPrivateForChat(*privPath, *stateDir)
+	if err != nil {
+		return err
+	}
+
+	msg := &protocol.Message{
+		Topic: *topic,
+		Type:  protocol.MessageType(*typ),
+		TTL:   *ttl,
+		Metadata: map[string]any{
+			"client":   "aiwre-cli",
+			"client_v": "0.1",
+		},
+		Body: plain,
+	}
+	if err := protocol.SignMessage(msg, priv); err != nil {
+		return err
+	}
+	raw, err := protocol.RenderSignalMD(msg)
+	if err != nil {
+		return err
+	}
+	policy := security.NewAdmissionPolicy()
+	if err := policy.Verify(msg); err != nil {
+		return fmt.Errorf("local verify failed: %w", err)
+	}
+	client := transport.NewClient(*relay)
+	resp, err := client.PublishFast(raw)
+	if err != nil {
+		return err
+	}
+	fmt.Println("say_sent:", resp.Accepted)
+	fmt.Println("topic:", msg.Topic)
+	fmt.Println("type:", msg.Type)
+	fmt.Println("id:", resp.ID)
 	return nil
 }
 
