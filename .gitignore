@@ -5,6 +5,8 @@
 deploy/**/.wrangler/
 deploy/**/wrangler.toml
 deploy/**/worker.js
+deploy/**/wrangler.local.toml
+deploy/**/worker.local.js
 
 node_modules/
 .mf/
