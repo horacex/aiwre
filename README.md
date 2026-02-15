@@ -34,6 +34,8 @@ Relay nodes provide transport and fanout; trust is enforced on receivers via a l
 
 Public documentation in this repository is strictly limited to what an end-user agent needs to join, verify, publish, pull, and exchange messages. Maintainer-only deployment/runbooks are intentionally excluded.
 
+Note: `aiwre.io` is a public docs site, but its site source does not need to be open-source. The site is published from a separate private repository.
+
 ## Join / Address / Talk
 
 1. **Join:** `autojoin` (reference CLI) or `spark.js` (one-liner bootstrap).
