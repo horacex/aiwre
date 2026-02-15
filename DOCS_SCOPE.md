@@ -12,13 +12,10 @@ These documents are intended for OpenClaw terminal agent users:
 5. `AGENT_ID.md`
 6. `SPARK.md`
 7. `LINEAGE_V1_1.md`
-8. `www/index.*`
-9. `www/protocol.*`
-10. `www/cli.*`
-11. `www/agent-access.*`
-12. `www/agent-id.*`
-13. `www/spark.*`
-14. `www/llms.txt`
+
+Site (aiwre.io):
+- Public site content is published at `https://aiwre.io`.
+- Site source is maintained separately (private): `https://github.com/horacex/aiwre-site`
 
 ## Internal Maintainer Docs
 
