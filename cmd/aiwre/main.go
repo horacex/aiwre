@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -117,7 +118,7 @@ func runVersion(_ []string) error {
 
 func runKeygen(args []string) error {
 	fs := flag.NewFlagSet("keygen", flag.ContinueOnError)
-	outDir := fs.String("out-dir", ".", "Directory for generated key files")
+	outDir := fs.String("out-dir", ".aiwre", "Directory for generated key files")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -143,7 +144,8 @@ func runSign(args []string) error {
 	fs := flag.NewFlagSet("sign", flag.ContinueOnError)
 	inPath := fs.String("in", "", "Input markdown/signal file")
 	outPath := fs.String("out", "", "Output signed Signal-MD file")
-	privPath := fs.String("priv", "", "Base64 private key file")
+	privPath := fs.String("priv", "", "Base64 private key file (optional; default <state-dir>/ed25519_private.key)")
+	stateDir := fs.String("state-dir", ".aiwre", "State directory for default private key path")
 	topic := fs.String("topic", "", "Topic if missing (namespace.topic)")
 	typeFlag := fs.String("type", string(protocol.TypeBroadcast), "Type if missing")
 	ttl := fs.Int("ttl", protocol.DefaultTTL, "TTL seconds if missing")
@@ -152,8 +154,15 @@ func runSign(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *inPath == "" || *outPath == "" || *privPath == "" {
-		return errors.New("--in, --out, and --priv are required")
+	if *inPath == "" || *outPath == "" {
+		return errors.New("--in and --out are required")
+	}
+	if strings.TrimSpace(*privPath) == "" {
+		base := strings.TrimSpace(*stateDir)
+		if base == "" {
+			base = ".aiwre"
+		}
+		*privPath = filepath.Join(base, "ed25519_private.key")
 	}
 	priv, err := loadPrivateKey(*privPath)
 	if err != nil {
@@ -1155,6 +1164,7 @@ func runRoomPull(args []string) error {
 	secret := fs.String("secret", "", "Shared room secret for decryption")
 	limit := fs.Int("limit", 20, "Number of recent messages")
 	outDir := fs.String("out-dir", "./room-inbox", "Directory for decrypted messages")
+	_ = fs.String("state-dir", ".aiwre", "State directory (accepted for symmetry; not required for pull)")
 	skipVerify := fs.Bool("skip-verify", false, "Skip admission verification")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -2005,6 +2015,18 @@ func loadOrCreateKeyPair(privPath string, pubPath string) (ed25519.PrivateKey, e
 		}
 		return priv, pub, false, nil
 	}
+	if errors.Is(err, os.ErrNotExist) {
+		// If Spark identity exists, import it in-place so CLI and Spark can share identity.
+		base := filepath.Dir(privPath)
+		if _, _, imported, impErr := maybeImportSparkIdentity(base); impErr == nil && imported {
+			priv2, err2 := loadPrivateKey(privPath)
+			if err2 == nil {
+				pub := priv2.Public().(ed25519.PublicKey)
+				_ = os.WriteFile(pubPath, []byte(base64.RawStdEncoding.EncodeToString(pub)+"\n"), 0644)
+				return priv2, pub, false, nil
+			}
+		}
+	}
 	if err := os.MkdirAll(filepath.Dir(privPath), 0755); err != nil {
 		return nil, nil, false, err
 	}
@@ -2096,6 +2118,71 @@ func loadPrivateKey(path string) (ed25519.PrivateKey, error) {
 	return ed25519.PrivateKey(key), nil
 }
 
+// Spark (JS) stores identity in JWK format. Importing it makes Spark/CLI interoperable.
+func maybeImportSparkIdentity(stateDir string) (ed25519.PrivateKey, ed25519.PublicKey, bool, error) {
+	base := strings.TrimSpace(stateDir)
+	if base == "" {
+		base = ".aiwre"
+	}
+	idPath := filepath.Join(base, "identity.json")
+	raw, err := os.ReadFile(idPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil, false, err
+		}
+		return nil, nil, false, err
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, nil, false, fmt.Errorf("invalid spark identity.json: %w", err)
+	}
+	pjwkAny, ok := doc["private_jwk"]
+	if !ok || pjwkAny == nil {
+		return nil, nil, false, errors.New("spark identity.json missing private_jwk")
+	}
+	pjwk, ok := pjwkAny.(map[string]any)
+	if !ok {
+		return nil, nil, false, errors.New("spark private_jwk must be an object")
+	}
+	kty, _ := pjwk["kty"].(string)
+	crv, _ := pjwk["crv"].(string)
+	d, _ := pjwk["d"].(string)
+	x, _ := pjwk["x"].(string)
+	if kty != "OKP" || crv != "Ed25519" || d == "" || x == "" {
+		return nil, nil, false, errors.New("spark private_jwk must be OKP/Ed25519 with d/x")
+	}
+	seed, err := base64.RawURLEncoding.DecodeString(d)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("invalid jwk.d: %w", err)
+	}
+	pubRaw, err := base64.RawURLEncoding.DecodeString(x)
+	if err != nil {
+		return nil, nil, false, fmt.Errorf("invalid jwk.x: %w", err)
+	}
+	if len(seed) != ed25519.SeedSize || len(pubRaw) != ed25519.PublicKeySize {
+		return nil, nil, false, errors.New("invalid jwk key sizes")
+	}
+	priv := ed25519.NewKeyFromSeed(seed)
+	pub := priv.Public().(ed25519.PublicKey)
+	if !bytes.Equal(pub, pubRaw) {
+		// Still import, but warn via error to avoid silent mismatch.
+		return nil, nil, false, errors.New("spark jwk public key mismatch")
+	}
+
+	privPath := filepath.Join(base, "ed25519_private.key")
+	pubPath := filepath.Join(base, "ed25519_public.key")
+	if err := os.MkdirAll(filepath.Dir(privPath), 0755); err != nil {
+		return nil, nil, false, err
+	}
+	if err := os.WriteFile(privPath, []byte(base64.RawStdEncoding.EncodeToString(priv)+"\n"), 0600); err != nil {
+		return nil, nil, false, err
+	}
+	if err := os.WriteFile(pubPath, []byte(base64.RawStdEncoding.EncodeToString(pub)+"\n"), 0644); err != nil {
+		return nil, nil, false, err
+	}
+	return priv, pub, true, nil
+}
+
 func loadPrivateForChat(privPath, stateDir string) (ed25519.PrivateKey, error) {
 	if strings.TrimSpace(privPath) != "" {
 		return loadPrivateKey(privPath)
@@ -2104,7 +2191,17 @@ func loadPrivateForChat(privPath, stateDir string) (ed25519.PrivateKey, error) {
 	if base == "" {
 		base = ".aiwre"
 	}
-	return loadPrivateKey(filepath.Join(base, "ed25519_private.key"))
+	keyPath := filepath.Join(base, "ed25519_private.key")
+	priv, err := loadPrivateKey(keyPath)
+	if err == nil {
+		return priv, nil
+	}
+	if errors.Is(err, os.ErrNotExist) {
+		if _, _, imported, impErr := maybeImportSparkIdentity(base); impErr == nil && imported {
+			return loadPrivateKey(keyPath)
+		}
+	}
+	return nil, err
 }
 
 func normalizeSenderID(raw string) (string, error) {
@@ -2319,15 +2416,30 @@ func decryptChatBody(secret, topic, cipherB64, nonceB64 string) (string, error) 
 }
 
 func pullAndDecryptChat(client *transport.Client, topic, secret string, limit int, outDir string, verifyAdmission bool, chatMode string) (int, error) {
-	profile, err := client.FetchBootstrap()
-	if err != nil {
-		return 0, err
+	// Chat topics (dm./room.) are designed to be pullable without scanning all shards.
+	// Prefer deterministic shard targeting via /v1/resolve-shard using key=topic.
+	shard := -1
+	if sr, err := client.ResolveShard(topic, topic); err == nil && sr != nil {
+		if sr.Shard >= 0 && sr.Shard < sr.ShardCount {
+			shard = sr.Shard
+		}
 	}
-	shardCount := profile.ShardCount
-	if shardCount < 1 {
-		shardCount = 1
+	var ids []string
+	var err error
+	if shard >= 0 {
+		ids, err = collectRecentSignalIDsForShard(client, topic, shard, limit, cursorStatePath(outDir))
+	} else {
+		// Fallback: scan shards (may be rate-limited).
+		profile, bootErr := client.FetchBootstrap()
+		if bootErr != nil {
+			return 0, bootErr
+		}
+		shardCount := profile.ShardCount
+		if shardCount < 1 {
+			shardCount = 1
+		}
+		ids, err = collectRecentSignalIDs(client, topic, limit, shardCount, cursorStatePath(outDir))
 	}
-	ids, err := collectRecentSignalIDs(client, topic, limit, shardCount, cursorStatePath(outDir))
 	if err != nil {
 		return 0, err
 	}
@@ -2399,6 +2511,130 @@ func pullAndDecryptChat(client *transport.Client, topic, secret string, limit in
 		saved++
 	}
 	return saved, nil
+}
+
+func isRateLimitError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// Transport errors include: "feed cursor failed: status=429 body=..."
+	return strings.Contains(err.Error(), "status=429")
+}
+
+func feedCursorWithRetry(client *transport.Client, topic string, shard int, cursor int64, limit int, attempts int) (*transport.CursorFeedResponse, error) {
+	if attempts < 1 {
+		attempts = 1
+	}
+	wait := 200 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		resp, err := client.FeedCursor(topic, shard, cursor, limit)
+		if err == nil {
+			return resp, nil
+		}
+		if !isRateLimitError(err) || i == attempts-1 {
+			return nil, err
+		}
+		time.Sleep(wait + time.Duration(time.Now().UnixNano()%int64(wait/2+1)))
+		if wait < 2*time.Second {
+			wait *= 2
+		}
+	}
+	return nil, errors.New("feed cursor retry exhausted")
+}
+
+func collectRecentSignalIDsForShard(client *transport.Client, topic string, shard int, limit int, cursorFile string) ([]string, error) {
+	if client == nil {
+		return nil, errors.New("client is nil")
+	}
+	if strings.TrimSpace(topic) == "" {
+		return nil, errors.New("topic is required")
+	}
+	if shard < 0 {
+		return nil, errors.New("invalid shard")
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	perShard := limit
+	if perShard < incrementalFeedMinLimit {
+		perShard = incrementalFeedMinLimit
+	}
+	if perShard > 200 {
+		perShard = 200
+	}
+
+	state := loadCursorState(cursorFile)
+	if savedCursor, ok := state.get(topic, shard); ok {
+		resp, err := feedCursorWithRetry(client, topic, shard, savedCursor, perShard, 5)
+		if err == nil && resp != nil {
+			// Cursor may be older than retention: jump to recent tail if the window is empty.
+			if resp.Count == 0 && resp.MaxSeq > resp.NextCursor {
+				tailCursor := resp.MaxSeq - int64(limit)
+				if tailCursor < 0 {
+					tailCursor = 0
+				}
+				tailResp, tailErr := feedCursorWithRetry(client, topic, shard, tailCursor, limit, 5)
+				if tailErr == nil && tailResp != nil {
+					state.set(topic, shard, tailResp.NextCursor)
+					_ = saveCursorState(cursorFile, state)
+					return collectIDsFromEntries(tailResp.Entries, limit), nil
+				}
+			}
+			state.set(topic, shard, resp.NextCursor)
+			_ = saveCursorState(cursorFile, state)
+			return collectIDsFromEntries(resp.Entries, limit), nil
+		}
+	}
+
+	meta, err := feedCursorWithRetry(client, topic, shard, 0, 1, 5)
+	if err != nil {
+		return nil, err
+	}
+	if meta == nil || meta.MaxSeq <= 0 {
+		return nil, nil
+	}
+	tailCursor := meta.MaxSeq - int64(limit)
+	if tailCursor < 0 {
+		tailCursor = 0
+	}
+	resp, err := feedCursorWithRetry(client, topic, shard, tailCursor, limit, 5)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, nil
+	}
+	state.set(topic, shard, resp.NextCursor)
+	_ = saveCursorState(cursorFile, state)
+	return collectIDsFromEntries(resp.Entries, limit), nil
+}
+
+func collectIDsFromEntries(entries []transport.FeedEntry, limit int) []string {
+	if len(entries) == 0 {
+		return nil
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Timestamp == entries[j].Timestamp {
+			return entries[i].ID < entries[j].ID
+		}
+		return entries[i].Timestamp > entries[j].Timestamp
+	})
+	ids := make([]string, 0, limit)
+	seen := map[string]struct{}{}
+	for _, e := range entries {
+		if e.ID == "" {
+			continue
+		}
+		if _, ok := seen[e.ID]; ok {
+			continue
+		}
+		seen[e.ID] = struct{}{}
+		ids = append(ids, e.ID)
+		if len(ids) >= limit {
+			break
+		}
+	}
+	return ids
 }
 
 type cursorState struct {
@@ -2500,7 +2736,7 @@ func dmUsageError() error {
 }
 
 func roomUsageText() string {
-	return "usage:\n  aiwre room send --relay <url> [--bootstrap <url>] --room <room_name> --secret <shared_secret> (--body <text> | --in <file>) [--state-dir ./.aiwre]\n  aiwre room pull --relay <url> [--bootstrap <url>] --room <room_name> --secret <shared_secret> [--limit 20] [--out-dir ./room-inbox]"
+	return "usage:\n  aiwre room send --relay <url> [--bootstrap <url>] --room <room_name> --secret <shared_secret> (--body <text> | --in <file>) [--state-dir ./.aiwre]\n  aiwre room pull --relay <url> [--bootstrap <url>] --room <room_name> --secret <shared_secret> [--limit 20] [--out-dir ./room-inbox] [--state-dir ./.aiwre]"
 }
 
 func roomUsageError() error {

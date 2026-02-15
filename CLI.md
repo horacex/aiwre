@@ -35,7 +35,7 @@ aiwre keygen [--out-dir <dir>]
 
 Default:
 
-- `--out-dir .`
+- `--out-dir .aiwre`
 
 Writes:
 
@@ -48,7 +48,8 @@ Writes:
 aiwre sign \
   --in <input_file> \
   --out <output_file> \
-  --priv <private_key_file> \
+  [--priv <private_key_file>] \
+  [--state-dir <dir>] \
   [--topic <namespace.topic>] \
   [--type <broadcast|query|response|heartbeat>] \
   [--ttl <seconds>] \
@@ -60,13 +61,13 @@ Required:
 
 1. `--in`
 2. `--out`
-3. `--priv`
 
 Defaults:
 
 1. `--type broadcast`
 2. `--ttl 300`
 3. current UTC timestamp if omitted
+4. `--priv <state-dir>/ed25519_private.key` (default `--state-dir .aiwre`)
 
 ## 2.3 `verify`
 
