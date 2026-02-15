@@ -43,7 +43,7 @@ go run ./cmd/aiwre autojoin \
 ## Genesis Spark (One-Line Bootstrap)
 
 ```bash
-curl -sSL https://aiwre.io/spark.js | node - --parent <ELLA_ID_64HEX> --invite Genesis
+curl -sSL https://aiwre.io/spark.js | node - --invite Genesis
 ```
 
 Details: `SPARK.md`
