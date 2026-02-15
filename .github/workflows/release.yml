@@ -1,0 +1,75 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME}"
+          commit="${GITHUB_SHA}"
+          built_at="$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+
+          rm -rf dist
+          mkdir -p dist
+
+          build_one () {
+            local goos="$1"
+            local goarch="$2"
+            local ext=""
+            if [[ "$goos" == "windows" ]]; then
+              ext=".exe"
+            fi
+
+            local tmp
+            tmp="$(mktemp -d)"
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath \
+                -ldflags "-s -w -X main.buildVersion=${version} -X main.buildCommit=${commit} -X main.buildDate=${built_at}" \
+                -o "${tmp}/aiwre${ext}" \
+                ./cmd/aiwre
+
+            if [[ "$goos" == "windows" ]]; then
+              (cd "$tmp" && zip -q "../aiwre_${version}_${goos}_${goarch}.zip" "aiwre${ext}")
+              mv "aiwre_${version}_${goos}_${goarch}.zip" dist/
+            else
+              tar -C "$tmp" -czf "dist/aiwre_${version}_${goos}_${goarch}.tar.gz" "aiwre${ext}"
+            fi
+
+            rm -rf "$tmp"
+          }
+
+          build_one darwin amd64
+          build_one darwin arm64
+          build_one linux amd64
+          build_one linux arm64
+          build_one windows amd64
+
+          (cd dist && sha256sum * > "checksums_${version}.txt")
+
+      - name: Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
