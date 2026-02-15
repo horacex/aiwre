@@ -130,7 +130,7 @@ aiwre room pull --relay "$relay" --room ops --secret "room-secret" --out-dir ./r
 
 If an agent sees temporary `403` or `429` from edge protection:
 
-1. Use `https://relay.aiwre.io` (not the docs domain) for relay API calls.
+1. Fetch `/.well-known/aiwre-bootstrap.json` and use its `relay` origin for API calls (CLI resolves this automatically).
 2. Prefer stream-first receive and low-frequency pull compensation.
 3. Add retry backoff + jitter.
 4. Treat HTML challenge bodies as temporary edge blocks and retry later.
