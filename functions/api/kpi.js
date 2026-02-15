@@ -132,7 +132,10 @@ async function buildKPIResponse() {
   }
 
   let headsOk = 0;
-  let feedOk = 0;
+  // sampleOk counts shards where we can safely treat the 24h window as known:
+  // - max_seq == 0 => definitely empty
+  // - max_seq > 0  => tail window fetch succeeded
+  let sampleOk = 0;
   let sumMaxSeq = 0;
   let signals24hSampleSum = 0;
   const agents24hSample = new Set();
@@ -149,23 +152,28 @@ async function buildKPIResponse() {
       headsOk += 1;
       sumMaxSeq += maxSeq;
 
-      if (maxSeq > 0) {
-        const cursor = Math.max(0, maxSeq - FEED_WINDOW_PER_SHARD);
-        const tailURL = new URL(`${relay}/v1/feed`);
-        tailURL.searchParams.set("topic", sampleTopic);
-        tailURL.searchParams.set("shard", String(sampleShard));
-        tailURL.searchParams.set("cursor", String(cursor));
-        tailURL.searchParams.set("limit", String(FEED_WINDOW_PER_SHARD));
-        const tail = await fetchJson(tailURL.toString());
-        feedOk += 1;
-        const entries = Array.isArray(tail?.entries) ? tail.entries : [];
-        for (const e of entries) {
-          const ts = parseTimestampMs(e?.timestamp);
-          if (ts < cutoffMs) continue;
-          signals24hSampleSum += 1;
-          if (typeof e?.sender === "string" && e.sender.length > 0) {
-            agents24hSample.add(e.sender.toLowerCase());
-          }
+      // Treat "empty shard" as a valid sampled window (otherwise UI shows '--' most of the time
+      // on low-traffic networks due to random sampling).
+      if (maxSeq <= 0) {
+        sampleOk += 1;
+        continue;
+      }
+
+      const cursor = Math.max(0, maxSeq - FEED_WINDOW_PER_SHARD);
+      const tailURL = new URL(`${relay}/v1/feed`);
+      tailURL.searchParams.set("topic", sampleTopic);
+      tailURL.searchParams.set("shard", String(sampleShard));
+      tailURL.searchParams.set("cursor", String(cursor));
+      tailURL.searchParams.set("limit", String(FEED_WINDOW_PER_SHARD));
+      const tail = await fetchJson(tailURL.toString());
+      sampleOk += 1;
+      const entries = Array.isArray(tail?.entries) ? tail.entries : [];
+      for (const e of entries) {
+        const ts = parseTimestampMs(e?.timestamp);
+        if (ts < cutoffMs) continue;
+        signals24hSampleSum += 1;
+        if (typeof e?.sender === "string" && e.sender.length > 0) {
+          agents24hSample.add(e.sender.toLowerCase());
         }
       }
     } catch (_) {
@@ -176,9 +184,9 @@ async function buildKPIResponse() {
   const topicSignalsTotalEst =
     headsOk > 0 ? Math.trunc((sumMaxSeq / headsOk) * shardCount) : null;
   const signals24h =
-    feedOk > 0 ? Math.trunc((signals24hSampleSum / feedOk) * shardCount) : null;
+    sampleOk > 0 ? Math.trunc((signals24hSampleSum / sampleOk) * shardCount) : null;
   const activeAgents24h =
-    feedOk > 0 ? Math.trunc((agents24hSample.size / feedOk) * shardCount) : null;
+    sampleOk > 0 ? Math.trunc((agents24hSample.size / sampleOk) * shardCount) : null;
 
   const shardPairs = shardCount;
   const coverageRatio = healthOk ? 1 : 0;
@@ -218,7 +226,7 @@ async function buildKPIResponse() {
         ratio: Number(coverageRatio.toFixed(3)),
       },
       sample_coverage: {
-        feed_windows_ok: feedOk,
+        feed_windows_ok: sampleOk,
         feed_windows_total: sampleCount,
       },
     },
