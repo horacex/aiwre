@@ -578,52 +578,188 @@ func runIDWhois(args []string) error {
 }
 
 func resolveAgentCard(client *transport.Client, topic string, limit int, shardCount int, targetSender string, targetAlias string) (*agentCardRecord, error) {
-	for attempt := 0; attempt < 4; attempt++ {
-		ids, err := collectRecentSignalIDs(client, topic, limit, shardCount, "")
-		if err != nil {
-			return nil, err
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	primaryShards, targeted := resolveShardsForQuery(client, topic, shardCount, targetSender, targetAlias)
+	allShards := make([]int, 0, shardCount)
+	for s := 0; s < shardCount; s++ {
+		allShards = append(allShards, s)
+	}
+
+	attempts := 6
+	if targetAlias != "" {
+		// Alias resolution has higher propagation delay and cannot be shard-targeted.
+		attempts = 7
+	}
+	wait := 300 * time.Millisecond
+	maxWait := 2 * time.Second
+
+	for attempt := 0; attempt < attempts; attempt++ {
+		shards := primaryShards
+		if targeted && attempt >= 2 {
+			// Fallback: if shard targeting was wrong or propagation is uneven, scan all shards.
+			shards = allShards
 		}
-		var best *agentCardRecord
-		var bestTS time.Time
-		for _, id := range ids {
-			raw, err := getSignalWithRetry(client, id, 3, 200*time.Millisecond)
-			if err != nil {
-				continue
-			}
-			msg, err := protocol.ParseSignalMD(raw)
-			if err != nil {
-				continue
-			}
-			if err := protocol.VerifyMessage(msg); err != nil {
-				continue
-			}
-			card := parseAgentCardMessage(msg)
-			if card == nil {
-				continue
-			}
-			if targetSender != "" && card.Sender != targetSender {
-				continue
-			}
-			if targetAlias != "" && !strings.EqualFold(card.Alias, targetAlias) {
-				continue
-			}
-			ts, err := time.Parse(time.RFC3339, card.UpdatedAt)
-			if err != nil {
-				ts = time.Time{}
-			}
-			if best == nil || ts.After(bestTS) || (ts.Equal(bestTS) && card.MessageID > best.MessageID) {
-				best = card
-				bestTS = ts
+		ids, err := collectRecentSignalIDsForResolve(client, topic, limit, shards)
+		if err == nil {
+			for _, id := range ids {
+				raw, err := getSignalWithRetry(client, id, 3, 200*time.Millisecond)
+				if err != nil {
+					continue
+				}
+				msg, err := protocol.ParseSignalMD(raw)
+				if err != nil {
+					continue
+				}
+				if err := protocol.VerifyMessage(msg); err != nil {
+					continue
+				}
+				card := parseAgentCardMessage(msg)
+				if card == nil {
+					continue
+				}
+				if targetSender != "" && card.Sender != targetSender {
+					continue
+				}
+				if targetAlias != "" && !strings.EqualFold(card.Alias, targetAlias) {
+					continue
+				}
+				return card, nil
 			}
 		}
-		if best != nil {
-			return best, nil
-		}
-		if attempt < 3 {
-			time.Sleep(400 * time.Millisecond)
+
+		if attempt < attempts-1 {
+			time.Sleep(wait)
+			wait = growBackoff(wait, maxWait)
 		}
 	}
+
 	return nil, fmt.Errorf("agent card not found for query")
+}
+
+func resolveShardsForQuery(client *transport.Client, topic string, shardCount int, targetSender string, targetAlias string) ([]int, bool) {
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	// If resolving by canonical sender id, try shard targeting to avoid scanning all shards.
+	if strings.TrimSpace(targetSender) != "" && strings.TrimSpace(targetAlias) == "" && client != nil {
+		if sr, err := client.ResolveShard(topic, targetSender); err == nil && sr != nil {
+			n := sr.ShardCount
+			if n < 1 {
+				n = shardCount
+			}
+			if sr.Shard >= 0 && sr.Shard < n {
+				return []int{sr.Shard}, true
+			}
+		}
+	}
+	shards := make([]int, 0, shardCount)
+	for s := 0; s < shardCount; s++ {
+		shards = append(shards, s)
+	}
+	return shards, false
+}
+
+func collectRecentSignalIDsForResolve(client *transport.Client, topic string, limit int, shards []int) ([]string, error) {
+	if client == nil {
+		return nil, errors.New("client is nil")
+	}
+	if strings.TrimSpace(topic) == "" {
+		return nil, errors.New("topic is required")
+	}
+	if limit <= 0 {
+		limit = 200
+	}
+	if len(shards) == 0 {
+		return nil, errors.New("no shards to scan")
+	}
+
+	perShard := (limit + len(shards) - 1) / len(shards)
+	if perShard < 3 {
+		perShard = 3
+	}
+	if perShard > 200 {
+		perShard = 200
+	}
+
+	type shardResult struct {
+		ok      bool
+		entries []transport.FeedEntry
+	}
+
+	results := make(chan shardResult, len(shards))
+	var wg sync.WaitGroup
+	for _, shard := range shards {
+		s := shard
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			meta, err := client.FeedCursor(topic, s, 0, 1)
+			if err != nil || meta == nil {
+				results <- shardResult{ok: false}
+				return
+			}
+			if meta.MaxSeq <= 0 {
+				results <- shardResult{ok: true}
+				return
+			}
+			tailCursor := meta.MaxSeq - int64(perShard)
+			if tailCursor < 0 {
+				tailCursor = 0
+			}
+			resp, err := client.FeedCursor(topic, s, tailCursor, perShard)
+			if err != nil || resp == nil {
+				results <- shardResult{ok: false}
+				return
+			}
+			results <- shardResult{ok: true, entries: resp.Entries}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	okShards := 0
+	entries := make([]transport.FeedEntry, 0, limit*2)
+	for r := range results {
+		if !r.ok {
+			continue
+		}
+		okShards++
+		if len(r.entries) > 0 {
+			entries = append(entries, r.entries...)
+		}
+	}
+	if okShards == 0 {
+		return nil, errors.New("feed unavailable for all shards")
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		if entries[i].Timestamp == entries[j].Timestamp {
+			return entries[i].ID < entries[j].ID
+		}
+		return entries[i].Timestamp > entries[j].Timestamp
+	})
+
+	ids := make([]string, 0, limit)
+	seen := map[string]struct{}{}
+	for _, e := range entries {
+		if e.ID == "" {
+			continue
+		}
+		if _, ok := seen[e.ID]; ok {
+			continue
+		}
+		seen[e.ID] = struct{}{}
+		ids = append(ids, e.ID)
+		if len(ids) >= limit {
+			break
+		}
+	}
+	return ids, nil
 }
 
 func parseAgentCardMessage(msg *protocol.Message) *agentCardRecord {

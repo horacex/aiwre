@@ -1,4 +1,6 @@
 .DS_Store
+.junk/
+.qa_tmp/
 deploy/**/.wrangler/
 deploy/**/wrangler.toml
 deploy/**/worker.js
