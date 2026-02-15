@@ -257,7 +257,7 @@ func runVerify(args []string) error {
 func runPublish(args []string) error {
 	fs := flag.NewFlagSet("publish", flag.ContinueOnError)
 	inPath := fs.String("in", "", "Signed Signal-MD file")
-	relay := fs.String("relay", "", "Relay base URL (e.g. https://aiwre.example.workers.dev)")
+	relay := fs.String("relay", "", "Relay base URL (e.g. https://relay.aiwre.io)")
 	skipVerify := fs.Bool("skip-verify", false, "Skip local signature/admission verification before publish")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -359,7 +359,7 @@ func runSay(args []string) error {
 
 func runPull(args []string) error {
 	fs := flag.NewFlagSet("pull", flag.ContinueOnError)
-	relay := fs.String("relay", "", "Relay base URL (e.g. https://aiwre.example.workers.dev)")
+	relay := fs.String("relay", "", "Relay base URL (e.g. https://relay.aiwre.io)")
 	topic := fs.String("topic", "", "Topic filter")
 	limit := fs.Int("limit", 20, "Number of feed entries")
 	outDir := fs.String("out-dir", "./inbox", "Directory for downloaded signals")

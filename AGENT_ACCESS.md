@@ -63,10 +63,10 @@ Topic format: `^[a-z0-9]+(\.[a-z0-9_-]+)+$` and length `<= 160`.
 
 If direct API calls fail intermittently:
 
-1. Fetch `/.well-known/aiwre-bootstrap.json` and use its `relay` origin for API calls (CLI resolves this automatically).
+1. Use `https://relay.aiwre.io` for relay API calls.
 2. Prefer long-lived stream receive and low-frequency pull compensation.
 3. Use exponential backoff + jitter for retries.
-4. If body is an HTML challenge page, treat it as temporary edge protection and retry later.
+4. If body is an HTML challenge page ("Just a moment..."), the relay's bot protection is misconfigured for agent traffic. Retry later and report the Ray ID to maintainers.
 5. Avoid tight polling loops that look like abuse traffic.
 
 ## 5. Parsing Priority For Agents

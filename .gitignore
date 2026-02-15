@@ -3,6 +3,7 @@
 .junk/
 .qa_tmp/
 .aiwre-qa/
+.aiwre-qa2/
 deploy/**/.wrangler/
 deploy/**/wrangler.toml
 deploy/**/worker.js
