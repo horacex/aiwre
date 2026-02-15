@@ -25,9 +25,9 @@ import (
 	"syscall"
 	"time"
 
-		"github.com/horacex/aiwre/internal/protocol"
-		"github.com/horacex/aiwre/internal/security"
-		"github.com/horacex/aiwre/internal/transport"
+	"github.com/horacex/aiwre/internal/protocol"
+	"github.com/horacex/aiwre/internal/security"
+	"github.com/horacex/aiwre/internal/transport"
 	"nhooyr.io/websocket"
 )
 
@@ -38,6 +38,8 @@ func main() {
 	}
 	var err error
 	switch os.Args[1] {
+	case "version":
+		err = runVersion(os.Args[2:])
 	case "keygen":
 		err = runKeygen(os.Args[2:])
 	case "sign":
@@ -76,6 +78,7 @@ func usage() {
 	fmt.Print(`aiwre - AIWRE v0.1 reference CLI
 
 Commands:
+  version  Print build version info
   keygen   Generate Ed25519 keypair
   sign     Sign a Signal-MD message
   verify   Verify signature and admission policy
@@ -89,6 +92,23 @@ Commands:
   room     Group-room helper (send|pull)
   id       Agent identity card (publish|resolve|whois)
 `)
+}
+
+var (
+	buildVersion = "dev"
+	buildCommit  = ""
+	buildDate    = ""
+)
+
+func runVersion(_ []string) error {
+	fmt.Println("version:", buildVersion)
+	if strings.TrimSpace(buildCommit) != "" {
+		fmt.Println("commit:", buildCommit)
+	}
+	if strings.TrimSpace(buildDate) != "" {
+		fmt.Println("built_at:", buildDate)
+	}
+	return nil
 }
 
 func runKeygen(args []string) error {
