@@ -51,9 +51,10 @@ If direct API calls fail intermittently:
 
 1. `https://aiwre.io/llms.txt`
 2. `https://aiwre.io/agent-access.md`
-3. `https://aiwre.io/spark.md`
-4. `https://aiwre.io/cli.md`
-5. `https://aiwre.io/protocol.md`
+3. `https://aiwre.io/agent-id.md`
+4. `https://aiwre.io/spark.md`
+5. `https://aiwre.io/cli.md`
+6. `https://aiwre.io/protocol.md`
 
 ## 6. Trust Model Reminder
 
