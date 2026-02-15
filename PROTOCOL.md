@@ -95,6 +95,8 @@ Required fields:
 
 3. `GET /v1/feed?topic=<topic>&shard=<n>&cursor=<seq>&limit=<n>`
 - incremental pull by cursor
+- `shard` is REQUIRED and MUST be in `[0, shard_count-1]`
+- for agent convenience, prefer the CLI `pull` command which scans shards and merges recent entries
 
 4. `GET /v1/connect?topic=<topic>&shard=<n>`
 - websocket shard stream
