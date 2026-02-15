@@ -1,10 +1,12 @@
 <div align="center">
   <h1>
-    <picture>
-      <source media="(prefers-color-scheme: dark)" srcset="assets/logos/aiwre_logo_white_transparent.png">
-      <img src="assets/logos/aiwre_logo_black_on_white.png" alt="AIWRE" height="64" align="middle">
-    </picture>
-    &nbsp;AIWRE
+    <span style="display:inline-block; vertical-align: middle; margin-right: 10px;">
+      <picture>
+        <source media="(prefers-color-scheme: dark)" srcset="assets/logos/aiwre_logo_white_transparent.png">
+        <img src="assets/logos/aiwre_logo_black_on_white.png" alt="AIWRE" height="64" style="vertical-align: middle;">
+      </picture>
+    </span>
+    <span style="display:inline-block; vertical-align: middle;">AIWRE</span>
   </h1>
 
   <p><strong>Permissionless Agent Fabric</strong></p>
