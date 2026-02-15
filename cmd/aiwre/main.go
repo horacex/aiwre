@@ -80,7 +80,7 @@ func main() {
 }
 
 func usage() {
-	fmt.Print(`aiwre - AIWRE v0.1 reference CLI
+	fmt.Print(`aiwre - AIWRE v1.0 reference CLI
 
 Commands:
   version  Print build version info
@@ -771,7 +771,7 @@ func resolveShardsForQuery(client *transport.Client, topic string, shardCount in
 	}
 	// If resolving by canonical sender id, try shard targeting to avoid scanning all shards.
 	if strings.TrimSpace(targetSender) != "" && strings.TrimSpace(targetAlias) == "" && client != nil {
-		if sr, err := client.ResolveShard(topic, targetSender); err == nil && sr != nil {
+		if sr, err := resolveShardWithRetry(client, topic, targetSender, 4); err == nil && sr != nil {
 			n := sr.ShardCount
 			if n < 1 {
 				n = shardCount
@@ -1792,7 +1792,17 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 	if shardCount < 1 {
 		shardCount = 1
 	}
-	perShard := (limit + shardCount - 1) / shardCount
+	// Pulling from every shard in parallel is expensive and can trigger relay rate/budget guards.
+	// Instead, we:
+	// 1) fetch shard heads (cursor=0,limit=1) with a small concurrency limit
+	// 2) prioritize shards that appear most active (or have the most new data since last cursor)
+	// 3) pull tail windows from a limited number of shards and merge results by timestamp
+	const shardTargetMax = 8
+	targetShards := shardCount
+	if targetShards > shardTargetMax {
+		targetShards = shardTargetMax
+	}
+	perShard := (limit + targetShards - 1) / targetShards
 	if perShard < 1 {
 		perShard = 1
 	}
@@ -1803,64 +1813,110 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 	}
 	state := loadCursorState(cursorFile)
 
-	type shardResult struct {
+	type shardMeta struct {
 		shard int
-		resp  *transport.CursorFeedResponse
-		err   error
+		max   int64
+		delta int64 // max - savedCursor (0 if no saved cursor)
 	}
-	results := make(chan shardResult, shardCount)
+	type metaResult struct {
+		m   shardMeta
+		err error
+	}
+	sem := make(chan struct{}, 4)
+	metaCh := make(chan metaResult, shardCount)
 	var wg sync.WaitGroup
 	for shard := 0; shard < shardCount; shard++ {
 		wg.Add(1)
 		go func(s int) {
 			defer wg.Done()
-			if savedCursor, ok := state.get(topic, s); ok {
-				resp, err := client.FeedCursor(topic, s, savedCursor, incrementalLimit)
-				if err == nil {
-					// Cursor may be older than retention: jump to recent tail if the window is empty.
-					if resp != nil && resp.Count == 0 && resp.MaxSeq > resp.NextCursor {
-						tailCursor := resp.MaxSeq - int64(perShard)
-						if tailCursor < 0 {
-							tailCursor = 0
-						}
-						tailResp, tailErr := client.FeedCursor(topic, s, tailCursor, perShard)
-						if tailErr == nil {
-							results <- shardResult{shard: s, resp: tailResp, err: nil}
-							return
-						}
-					}
-					results <- shardResult{shard: s, resp: resp, err: nil}
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			head, err := feedCursorWithRetry(client, topic, s, 0, 1, 5)
+			if err != nil || head == nil {
+				metaCh <- metaResult{err: err}
+				return
+			}
+			saved, ok := state.get(topic, s)
+			delta := int64(0)
+			if ok && head.MaxSeq > saved {
+				delta = head.MaxSeq - saved
+			}
+			metaCh <- metaResult{m: shardMeta{shard: s, max: head.MaxSeq, delta: delta}, err: nil}
+		}(shard)
+	}
+	wg.Wait()
+	close(metaCh)
+
+	metas := make([]shardMeta, 0, shardCount)
+	okShards := 0
+	for r := range metaCh {
+		if r.err != nil {
+			continue
+		}
+		okShards++
+		metas = append(metas, r.m)
+	}
+	if okShards == 0 {
+		return nil, errors.New("feed unavailable for all shards")
+	}
+
+	// Prefer shards with the most unseen data; otherwise fall back to the most active shards.
+	sort.Slice(metas, func(i, j int) bool {
+		if metas[i].delta == metas[j].delta {
+			return metas[i].max > metas[j].max
+		}
+		return metas[i].delta > metas[j].delta
+	})
+	if len(metas) > targetShards {
+		metas = metas[:targetShards]
+	}
+
+	type shardResp struct {
+		shard int
+		resp  *transport.CursorFeedResponse
+		err   error
+	}
+	respCh := make(chan shardResp, len(metas))
+	wg = sync.WaitGroup{}
+	for _, m := range metas {
+		wg.Add(1)
+		go func(s int, maxSeq int64) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			if savedCursor, ok := state.get(topic, s); ok && maxSeq > savedCursor {
+				// Incremental catch-up.
+				resp, err := feedCursorWithRetry(client, topic, s, savedCursor, incrementalLimit, 5)
+				if err == nil && resp != nil {
+					respCh <- shardResp{shard: s, resp: resp, err: nil}
 					return
 				}
 			}
 
-			meta, err := client.FeedCursor(topic, s, 0, 1)
-			if err != nil {
-				results <- shardResult{shard: s, resp: nil, err: err}
-				return
-			}
-			tailCursor := meta.MaxSeq - int64(perShard)
+			// Fallback: read tail window.
+			tailCursor := maxSeq - int64(perShard)
 			if tailCursor < 0 {
 				tailCursor = 0
 			}
-			resp, err := client.FeedCursor(topic, s, tailCursor, perShard)
-			results <- shardResult{shard: s, resp: resp, err: err}
-		}(shard)
+			resp, err := feedCursorWithRetry(client, topic, s, tailCursor, perShard, 5)
+			respCh <- shardResp{shard: s, resp: resp, err: err}
+		}(m.shard, m.max)
 	}
 	wg.Wait()
-	close(results)
+	close(respCh)
 
 	entries := make([]transport.FeedEntry, 0, limit*2)
-	okShards := 0
-	for item := range results {
+	okPulled := 0
+	for item := range respCh {
 		if item.err != nil || item.resp == nil {
 			continue
 		}
-		okShards++
+		okPulled++
 		state.set(topic, item.shard, item.resp.NextCursor)
 		entries = append(entries, item.resp.Entries...)
 	}
-	if okShards == 0 {
+	if okPulled == 0 {
 		return nil, errors.New("feed unavailable for all shards")
 	}
 	_ = saveCursorState(cursorFile, state)
@@ -2448,7 +2504,7 @@ func pullAndDecryptChat(client *transport.Client, topic, secret string, limit in
 	// Chat topics (dm./room.) are designed to be pullable without scanning all shards.
 	// Prefer deterministic shard targeting via /v1/resolve-shard using key=topic.
 	shard := -1
-	if sr, err := client.ResolveShard(topic, topic); err == nil && sr != nil {
+	if sr, err := resolveShardWithRetry(client, topic, topic, 4); err == nil && sr != nil {
 		if sr.Shard >= 0 && sr.Shard < sr.ShardCount {
 			shard = sr.Shard
 		}
@@ -2548,6 +2604,30 @@ func isRateLimitError(err error) bool {
 	}
 	// Transport errors include: "feed cursor failed: status=429 body=..."
 	return strings.Contains(err.Error(), "status=429")
+}
+
+func resolveShardWithRetry(client *transport.Client, topic string, key string, attempts int) (*transport.ShardResolveResponse, error) {
+	if client == nil {
+		return nil, errors.New("client is nil")
+	}
+	if attempts < 1 {
+		attempts = 1
+	}
+	wait := 200 * time.Millisecond
+	for i := 0; i < attempts; i++ {
+		resp, err := client.ResolveShard(topic, key)
+		if err == nil {
+			return resp, nil
+		}
+		if !isRateLimitError(err) || i == attempts-1 {
+			return nil, err
+		}
+		time.Sleep(wait + time.Duration(time.Now().UnixNano()%int64(wait/2+1)))
+		if wait < 2*time.Second {
+			wait *= 2
+		}
+	}
+	return nil, errors.New("resolve shard retry exhausted")
 }
 
 func feedCursorWithRetry(client *transport.Client, topic string, shard int, cursor int64, limit int, attempts int) (*transport.CursorFeedResponse, error) {
