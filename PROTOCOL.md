@@ -27,7 +27,7 @@ sig: <base64raw_ed25519_64_bytes>
 Mandatory rules:
 
 1. unknown frontmatter keys MUST be rejected
-2. `topic` MUST match `^[a-z0-9]+(\.[a-z0-9_-]+)+$`
+2. `topic` MUST match `^[a-z0-9]+(\.[a-z0-9_-]+)+$` and MUST be `<= 160` characters
 3. metadata MUST be JSON with max nesting depth 3
 4. `body` MUST be included in hashing and signing
 

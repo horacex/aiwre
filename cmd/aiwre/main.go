@@ -947,6 +947,7 @@ func printAgentCard(card *agentCardRecord, query string, relay string) {
 func runDMSend(args []string) error {
 	fs := flag.NewFlagSet("dm send", flag.ContinueOnError)
 	relay := fs.String("relay", "", "Relay base URL")
+	bootstrap := fs.String("bootstrap", "", "Alias of --relay (bootstrap URL or relay base URL)")
 	to := fs.String("to", "", "Recipient sender fingerprint (64 hex)")
 	secret := fs.String("secret", "", "Shared secret for DM encryption")
 	inPath := fs.String("in", "", "Plaintext message file")
@@ -957,8 +958,11 @@ func runDMSend(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if strings.TrimSpace(*relay) == "" && strings.TrimSpace(*bootstrap) != "" {
+		*relay = strings.TrimSpace(*bootstrap)
+	}
 	if *relay == "" || *to == "" || *secret == "" {
-		return errors.New("--relay, --to, and --secret are required")
+		return errors.New("--relay, --to, and --secret are required\n" + dmUsageText())
 	}
 	peerID, err := normalizeSenderID(*to)
 	if err != nil {
@@ -1017,6 +1021,7 @@ func runDMSend(args []string) error {
 func runDMPull(args []string) error {
 	fs := flag.NewFlagSet("dm pull", flag.ContinueOnError)
 	relay := fs.String("relay", "", "Relay base URL")
+	bootstrap := fs.String("bootstrap", "", "Alias of --relay (bootstrap URL or relay base URL)")
 	withID := fs.String("with", "", "Peer sender fingerprint (64 hex)")
 	secret := fs.String("secret", "", "Shared secret for DM encryption")
 	limit := fs.Int("limit", 20, "Number of recent messages")
@@ -1027,8 +1032,11 @@ func runDMPull(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if strings.TrimSpace(*relay) == "" && strings.TrimSpace(*bootstrap) != "" {
+		*relay = strings.TrimSpace(*bootstrap)
+	}
 	if *relay == "" || *withID == "" || *secret == "" {
-		return errors.New("--relay, --with, and --secret are required")
+		return errors.New("--relay, --with, and --secret are required\n" + dmUsageText())
 	}
 	peerID, err := normalizeSenderID(*withID)
 	if err != nil {
@@ -1054,6 +1062,7 @@ func runDMPull(args []string) error {
 func runRoomSend(args []string) error {
 	fs := flag.NewFlagSet("room send", flag.ContinueOnError)
 	relay := fs.String("relay", "", "Relay base URL")
+	bootstrap := fs.String("bootstrap", "", "Alias of --relay (bootstrap URL or relay base URL)")
 	room := fs.String("room", "", "Room name (topic segment)")
 	secret := fs.String("secret", "", "Shared room secret for encryption")
 	inPath := fs.String("in", "", "Plaintext message file")
@@ -1064,8 +1073,11 @@ func runRoomSend(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if strings.TrimSpace(*relay) == "" && strings.TrimSpace(*bootstrap) != "" {
+		*relay = strings.TrimSpace(*bootstrap)
+	}
 	if *relay == "" || *room == "" || *secret == "" {
-		return errors.New("--relay, --room, and --secret are required")
+		return errors.New("--relay, --room, and --secret are required\n" + roomUsageText())
 	}
 	roomID, err := normalizeTopicSegment(*room)
 	if err != nil {
@@ -1122,6 +1134,7 @@ func runRoomSend(args []string) error {
 func runRoomPull(args []string) error {
 	fs := flag.NewFlagSet("room pull", flag.ContinueOnError)
 	relay := fs.String("relay", "", "Relay base URL")
+	bootstrap := fs.String("bootstrap", "", "Alias of --relay (bootstrap URL or relay base URL)")
 	room := fs.String("room", "", "Room name (topic segment)")
 	secret := fs.String("secret", "", "Shared room secret for decryption")
 	limit := fs.Int("limit", 20, "Number of recent messages")
@@ -1130,8 +1143,11 @@ func runRoomPull(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if strings.TrimSpace(*relay) == "" && strings.TrimSpace(*bootstrap) != "" {
+		*relay = strings.TrimSpace(*bootstrap)
+	}
 	if *relay == "" || *room == "" || *secret == "" {
-		return errors.New("--relay, --room, and --secret are required")
+		return errors.New("--relay, --room, and --secret are required\n" + roomUsageText())
 	}
 	roomID, err := normalizeTopicSegment(*room)
 	if err != nil {
@@ -2460,7 +2476,7 @@ func safeTimestamp(raw string) string {
 }
 
 func dmUsageText() string {
-	return "usage:\n  aiwre dm send --relay <url> --to <sender_fp> --secret <shared_secret> (--body <text> | --in <file>) [--state-dir ./.aiwre]\n  aiwre dm pull --relay <url> --with <sender_fp> --secret <shared_secret> [--limit 20] [--out-dir ./dm-inbox] [--state-dir ./.aiwre]"
+	return "usage:\n  aiwre dm send --relay <url> [--bootstrap <url>] --to <sender_fp> --secret <shared_secret> (--body <text> | --in <file>) [--state-dir ./.aiwre]\n  aiwre dm pull --relay <url> [--bootstrap <url>] --with <sender_fp> --secret <shared_secret> [--limit 20] [--out-dir ./dm-inbox] [--state-dir ./.aiwre]"
 }
 
 func dmUsageError() error {
@@ -2468,7 +2484,7 @@ func dmUsageError() error {
 }
 
 func roomUsageText() string {
-	return "usage:\n  aiwre room send --relay <url> --room <room_name> --secret <shared_secret> (--body <text> | --in <file>) [--state-dir ./.aiwre]\n  aiwre room pull --relay <url> --room <room_name> --secret <shared_secret> [--limit 20] [--out-dir ./room-inbox]"
+	return "usage:\n  aiwre room send --relay <url> [--bootstrap <url>] --room <room_name> --secret <shared_secret> (--body <text> | --in <file>) [--state-dir ./.aiwre]\n  aiwre room pull --relay <url> [--bootstrap <url>] --room <room_name> --secret <shared_secret> [--limit 20] [--out-dir ./room-inbox]"
 }
 
 func roomUsageError() error {
