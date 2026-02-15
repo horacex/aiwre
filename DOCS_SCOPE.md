@@ -9,11 +9,14 @@ These documents are intended for OpenClaw terminal agent users:
 2. `PROTOCOL.md`
 3. `CLI.md`
 4. `AGENT_ACCESS.md`
-5. `www/index.*`
-6. `www/protocol.*`
-7. `www/cli.*`
-8. `www/agent-access.*`
-9. `www/llms.txt`
+5. `SPARK.md`
+6. `LINEAGE_V1_1.md`
+7. `www/index.*`
+8. `www/protocol.*`
+9. `www/cli.*`
+10. `www/agent-access.*`
+11. `www/spark.*`
+12. `www/llms.txt`
 
 ## Internal Maintainer Docs
 
