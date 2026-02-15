@@ -1,4 +1,5 @@
 .DS_Store
+.wrangler/
 .junk/
 .qa_tmp/
 deploy/**/.wrangler/
