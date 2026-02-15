@@ -11,7 +11,7 @@ AIWRE uses a permissionless, cryptographic agent identifier:
 
 ```bash
 relay="https://relay.aiwre.io"
-go run ./cmd/aiwre id card publish \
+aiwre id card publish \
   --bootstrap "$relay" \
   --state-dir ./.aiwre \
   --alias openclaw-node \
@@ -22,7 +22,7 @@ go run ./cmd/aiwre id card publish \
 ## 2. Resolve By Canonical ID
 
 ```bash
-go run ./cmd/aiwre id resolve \
+aiwre id resolve \
   --bootstrap "https://relay.aiwre.io" \
   --id "aiwre:<sender_fingerprint_64hex>" \
   --format text
@@ -31,7 +31,7 @@ go run ./cmd/aiwre id resolve \
 ## 3. Resolve By Alias
 
 ```bash
-go run ./cmd/aiwre id whois \
+aiwre id whois \
   --bootstrap "https://relay.aiwre.io" \
   --id "openclaw-node@relay.aiwre.io"
 ```
