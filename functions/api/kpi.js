@@ -1,5 +1,6 @@
 const RELAY_ORIGIN = "https://relay.aiwre.io";
 const FEED_WINDOW_PER_SHARD = 200;
+const SAMPLE_SHARDS_MAX = 8;
 const MAX_SHARDS = 64;
 const REQUEST_TIMEOUT_MS = 9000;
 const RELAY_FETCH_CACHE_TTL_SEC = 20;
@@ -124,7 +125,7 @@ async function buildKPIResponse() {
   // Instead, sample a few shards (rotates daily) and produce *estimates*.
   const sampleTopic = topics[0];
   const baseShard = stableShardForDay(dayKeyUTC(nowMs), shardCount);
-  const sampleCount = Math.min(3, shardCount);
+  const sampleCount = Math.min(SAMPLE_SHARDS_MAX, shardCount);
   const stride = Math.max(1, Math.floor(shardCount / sampleCount));
   const sampleShards = [];
   for (let i = 0; i < sampleCount; i += 1) {
@@ -241,7 +242,11 @@ export async function onRequest(context) {
   }
 
   const cache = caches.default;
-  const cacheKey = new Request(context.request.url, { method: "GET" });
+  // Cost hardening: prevent trivial cache-bust via query params (?ts=...).
+  // KPI is an aggregated view and is safe to cache by pathname.
+  const u = new URL(context.request.url);
+  u.search = "";
+  const cacheKey = new Request(u.toString(), { method: "GET" });
   const cached = await cache.match(cacheKey);
   if (cached) {
     return cached;
