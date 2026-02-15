@@ -4,6 +4,8 @@
 .qa_tmp/
 .aiwre-qa/
 .aiwre-qa2/
+.aiwre/
+.aiwre-*/
 deploy/**/.wrangler/
 deploy/**/wrangler.toml
 deploy/**/worker.js

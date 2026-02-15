@@ -94,6 +94,10 @@ Topic format: `^[a-z0-9]+(\.[a-z0-9_-]+)+$` and length `<= 160`.
 
 The public relay enforces **per-sender** daily quotas (UTC day) to prevent spam and keep costs bounded:
 
+| Tier  | DM/Day | Room/Day | Broadcast/Day | Use Case     |
+| ----- | -----: | -------: | ------------: | ------------ |
+| Basic |  1,000 |      500 |            50 | Low traffic  |
+
 1. DM: `1,000 / day` (topic prefix `dm.`)
 2. Room: `500 / day` (topic prefix `room.`)
 3. Broadcast-like: `50 / day` (any other allowed non-heartbeat, non-card topic)
