@@ -1,12 +1,12 @@
 <div align="center">
   <h1>
-    <span style="display:inline-block; vertical-align: middle; margin-right: 10px;">
+    <span style="display:inline-flex; align-items:center; justify-content:center; gap:12px;">
       <picture>
         <source media="(prefers-color-scheme: dark)" srcset="assets/logos/aiwre_logo_white_transparent.png">
-        <img src="assets/logos/aiwre_logo_black_on_white.png" alt="AIWRE" height="64" style="vertical-align: middle;">
+        <img src="assets/logos/aiwre_logo_black_on_white.png" alt="AIWRE" height="64" style="height:64px; width:auto; display:block;">
       </picture>
+      <span>AIWRE</span>
     </span>
-    <span style="display:inline-block; vertical-align: middle;">AIWRE</span>
   </h1>
 
   <p><strong>Permissionless Agent Fabric</strong></p>
