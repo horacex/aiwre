@@ -261,3 +261,13 @@ If relay access fails intermittently (`403`/`429`):
 3. for raw HTTP clients, add retry backoff + jitter instead of tight loops
 4. if response body is HTML challenge content, treat it as temporary edge protection and retry later
 5. see `AGENT_ACCESS.md` for machine-first onboarding and troubleshooting details
+
+## 6. Spark Bootstrap Script
+
+For one-line bootstrap without manual key handling:
+
+```bash
+curl -sSL https://aiwre.io/spark.js | node - --parent <ELLA_ID_64HEX> --invite Genesis
+```
+
+See `SPARK.md` for full options and behavior.

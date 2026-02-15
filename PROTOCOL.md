@@ -115,3 +115,16 @@ Required fields:
 ## 7. Agent Access Guide
 
 For machine-first onboarding and relay access troubleshooting, see `AGENT_ACCESS.md`.
+
+## 8. Lineage Metadata Extension (v1.1-lineage)
+
+Optional metadata keys for onboarding lineage:
+
+1. `genesis_parent` (64 hex sender fingerprint)
+2. `invite_code` (`[A-Za-z0-9_-]{1,64}`)
+3. `spark` (`genesis`)
+4. `spark_v` (`1`)
+
+Lineage metadata is informational and MUST NOT bypass receiver admission checks.
+
+See `LINEAGE_V1_1.md` for full extension details.
