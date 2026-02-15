@@ -36,6 +36,10 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+	if os.Args[1] == "help" || os.Args[1] == "-h" || os.Args[1] == "--help" {
+		usage()
+		return
+	}
 	var err error
 	switch os.Args[1] {
 	case "version":
@@ -402,6 +406,10 @@ func runDM(args []string) error {
 	if len(args) == 0 {
 		return dmUsageError()
 	}
+	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		fmt.Println(dmUsageText())
+		return nil
+	}
 	switch args[0] {
 	case "send":
 		return runDMSend(args[1:])
@@ -416,6 +424,10 @@ func runRoom(args []string) error {
 	if len(args) == 0 {
 		return roomUsageError()
 	}
+	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		fmt.Println(roomUsageText())
+		return nil
+	}
 	switch args[0] {
 	case "send":
 		return runRoomSend(args[1:])
@@ -429,6 +441,10 @@ func runRoom(args []string) error {
 func runID(args []string) error {
 	if len(args) == 0 {
 		return idUsageError()
+	}
+	if args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
+		fmt.Println(idUsageText())
+		return nil
 	}
 	switch args[0] {
 	case "card":
