@@ -279,7 +279,8 @@ func runPublish(args []string) error {
 			return fmt.Errorf("local verify failed: %w", err)
 		}
 	}
-	client := transport.NewClient(*relay)
+	resolvedRelay, _, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
 	resp, err := client.PublishFast(string(raw))
 	if err != nil {
 		return err
@@ -343,7 +344,8 @@ func runSay(args []string) error {
 	if err := policy.Verify(msg); err != nil {
 		return fmt.Errorf("local verify failed: %w", err)
 	}
-	client := transport.NewClient(*relay)
+	resolvedRelay, _, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
 	resp, err := client.PublishFast(raw)
 	if err != nil {
 		return err
@@ -368,10 +370,22 @@ func runPull(args []string) error {
 	if *relay == "" {
 		return errors.New("--relay is required")
 	}
-	client := transport.NewClient(*relay)
-	profile, err := client.FetchBootstrap()
-	if err != nil {
-		return err
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
+	// Pull requires shard_count/default_topics; if bootstrap fetch failed earlier, try once more.
+	if profile == nil || profile.ShardCount < 1 {
+		p2, err := client.FetchBootstrap()
+		if err != nil {
+			return err
+		}
+		profile = p2
+		if profile != nil && strings.TrimSpace(profile.Relay) != "" {
+			r2 := strings.TrimRight(profile.Relay, "/")
+			if r2 != "" && r2 != resolvedRelay {
+				resolvedRelay = r2
+				client = transport.NewClient(resolvedRelay)
+			}
+		}
 	}
 	resolvedTopic := strings.TrimSpace(*topic)
 	if resolvedTopic == "" {
@@ -1031,7 +1045,8 @@ func runDMSend(args []string) error {
 	if err := policy.Verify(msg); err != nil {
 		return fmt.Errorf("local verify failed: %w", err)
 	}
-	client := transport.NewClient(*relay)
+	resolvedRelay, _, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
 	resp, err := client.PublishFast(raw)
 	if err != nil {
 		return err
@@ -1073,7 +1088,8 @@ func runDMPull(args []string) error {
 	}
 	selfID := protocol.Fingerprint(priv.Public().(ed25519.PublicKey))
 	topic := dmTopic(selfID, peerID)
-	client := transport.NewClient(*relay)
+	resolvedRelay, _, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
 	count, err := pullAndDecryptChat(client, topic, *secret, *limit, *outDir, !*skipVerify, "dm")
 	if err != nil {
 		return err
@@ -1145,7 +1161,8 @@ func runRoomSend(args []string) error {
 	if err := policy.Verify(msg); err != nil {
 		return fmt.Errorf("local verify failed: %w", err)
 	}
-	client := transport.NewClient(*relay)
+	resolvedRelay, _, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
 	resp, err := client.PublishFast(raw)
 	if err != nil {
 		return err
@@ -1180,7 +1197,8 @@ func runRoomPull(args []string) error {
 		return fmt.Errorf("--room: %w", err)
 	}
 	topic := "room." + roomID
-	client := transport.NewClient(*relay)
+	resolvedRelay, _, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
 	count, err := pullAndDecryptChat(client, topic, *secret, *limit, *outDir, !*skipVerify, "room")
 	if err != nil {
 		return err
@@ -1552,10 +1570,21 @@ func runStream(args []string) error {
 		return err
 	}
 
-	client := transport.NewClient(*relay)
-	profile, err := client.FetchBootstrap()
-	if err != nil {
-		return err
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	client := transport.NewClient(resolvedRelay)
+	if profile == nil || profile.ShardCount < 1 {
+		p2, err := client.FetchBootstrap()
+		if err != nil {
+			return err
+		}
+		profile = p2
+		if profile != nil && strings.TrimSpace(profile.Relay) != "" {
+			r2 := strings.TrimRight(profile.Relay, "/")
+			if r2 != "" && r2 != resolvedRelay {
+				resolvedRelay = r2
+				client = transport.NewClient(resolvedRelay)
+			}
+		}
 	}
 	resolvedTopic := strings.TrimSpace(*topic)
 	if resolvedTopic == "" {

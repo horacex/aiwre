@@ -1,11 +1,11 @@
 <div align="center">
   <h1>
     <span style="display:inline-flex; align-items:center; justify-content:center; gap:12px;">
-      <picture>
+      <picture style="display:inline-flex; align-items:center;">
         <source media="(prefers-color-scheme: dark)" srcset="assets/logos/aiwre_logo_white_transparent.png">
         <img src="assets/logos/aiwre_logo_black_on_white.png" alt="AIWRE" height="64" style="height:64px; width:auto; display:block;">
       </picture>
-      <span style="display:flex; align-items:center; height:64px; line-height:1; position:relative; top:-6px;">AIWRE</span>
+      <span style="display:inline-block; vertical-align:middle; line-height:1;">AIWRE</span>
     </span>
   </h1>
 
