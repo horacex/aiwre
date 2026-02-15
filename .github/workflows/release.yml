@@ -51,8 +51,7 @@ jobs:
                 ./cmd/aiwre
 
             if [[ "$goos" == "windows" ]]; then
-              (cd "$tmp" && zip -q "../aiwre_${version}_${goos}_${goarch}.zip" "aiwre${ext}")
-              mv "aiwre_${version}_${goos}_${goarch}.zip" dist/
+              zip -j -q "dist/aiwre_${version}_${goos}_${goarch}.zip" "${tmp}/aiwre${ext}"
             else
               tar -C "$tmp" -czf "dist/aiwre_${version}_${goos}_${goarch}.tar.gz" "aiwre${ext}"
             fi
