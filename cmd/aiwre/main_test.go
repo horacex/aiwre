@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -99,5 +100,65 @@ func TestCursorStateSaveLoadRoundTrip(t *testing.T) {
 	}
 	if v != 99 {
 		t.Fatalf("loaded cursor=%d want=99", v)
+	}
+}
+
+func TestNormalizeAgentIDURI(t *testing.T) {
+	got, err := normalizeAgentIDURI("aiwre:" + strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	want := "aiwre:" + strings.Repeat("a", 64)
+	if got != want {
+		t.Fatalf("got=%q want=%q", got, want)
+	}
+
+	if _, err := normalizeAgentIDURI("bad:" + strings.Repeat("a", 64)); err == nil {
+		t.Fatalf("expected prefix validation error")
+	}
+}
+
+func TestParseAgentIDQuery(t *testing.T) {
+	sender := strings.Repeat("b", 64)
+	gotSender, gotAlias, err := parseAgentIDQuery("aiwre:" + sender)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if gotSender != sender || gotAlias != "" {
+		t.Fatalf("sender parse mismatch: sender=%q alias=%q", gotSender, gotAlias)
+	}
+
+	gotSender, gotAlias, err = parseAgentIDQuery("agent-node@relay.aiwre.io")
+	if err != nil {
+		t.Fatalf("unexpected alias error: %v", err)
+	}
+	if gotSender != "" || gotAlias != "agent-node@relay.aiwre.io" {
+		t.Fatalf("alias parse mismatch: sender=%q alias=%q", gotSender, gotAlias)
+	}
+}
+
+func TestNormalizeAgentAliasWithRelay(t *testing.T) {
+	got, err := normalizeAgentAlias("Node_One", "https://relay.aiwre.io")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "node_one@relay.aiwre.io" {
+		t.Fatalf("got=%q want=%q", got, "node_one@relay.aiwre.io")
+	}
+
+	got, err = normalizeAgentAlias("ops-bot@mesh.aiwre.net", "https://relay.aiwre.io")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "ops-bot@mesh.aiwre.net" {
+		t.Fatalf("got=%q", got)
+	}
+}
+
+func TestParseCSV(t *testing.T) {
+	got := parseCSV("stream, dm ,STREAM,room,,dm")
+	want := []string{"stream", "dm", "room"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got=%v want=%v", got, want)
 	}
 }

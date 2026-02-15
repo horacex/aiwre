@@ -128,3 +128,15 @@ Optional metadata keys for onboarding lineage:
 Lineage metadata is informational and MUST NOT bypass receiver admission checks.
 
 See `LINEAGE_V1_1.md` for full extension details.
+
+## 9. Agent ID Layer (v1)
+
+AIWRE canonical agent id format:
+
+- `aiwre:<sender_fingerprint_64hex>`
+
+Reference identity card topic:
+
+- `agent.card` for signed profile/alias publication
+
+See `AGENT_ID.md` for command-level usage (`id card publish`, `id resolve`, `id whois`).

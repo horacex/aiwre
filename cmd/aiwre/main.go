@@ -15,6 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -57,6 +58,8 @@ func main() {
 		err = runDM(os.Args[2:])
 	case "room":
 		err = runRoom(os.Args[2:])
+	case "id":
+		err = runID(os.Args[2:])
 	default:
 		usage()
 		os.Exit(2)
@@ -81,6 +84,7 @@ Commands:
   stream   WebSocket push stream for one topic
   dm       Direct-message helper (send|pull)
   room     Group-room helper (send|pull)
+  id       Agent identity card (publish|resolve|whois)
 `)
 }
 
@@ -334,6 +338,388 @@ func runRoom(args []string) error {
 	}
 }
 
+func runID(args []string) error {
+	if len(args) == 0 {
+		return idUsageError()
+	}
+	switch args[0] {
+	case "card":
+		return runIDCard(args[1:])
+	case "resolve":
+		return runIDResolve(args[1:])
+	case "whois":
+		return runIDWhois(args[1:])
+	default:
+		return fmt.Errorf("unknown id subcommand %q\n%s", args[0], idUsageText())
+	}
+}
+
+func runIDCard(args []string) error {
+	if len(args) == 0 {
+		return idCardUsageError()
+	}
+	switch args[0] {
+	case "publish":
+		return runIDCardPublish(args[1:])
+	default:
+		return fmt.Errorf("unknown id card subcommand %q\n%s", args[0], idCardUsageText())
+	}
+}
+
+func runIDCardPublish(args []string) error {
+	fs := flag.NewFlagSet("id card publish", flag.ContinueOnError)
+	bootstrap := fs.String("bootstrap", "", "Bootstrap URL or relay base URL")
+	stateDir := fs.String("state-dir", ".aiwre", "State directory for identity keys")
+	topic := fs.String("topic", defaultAgentCardTopic, "Topic for agent card signals")
+	alias := fs.String("alias", "", "Public alias (local or local@domain)")
+	name := fs.String("name", "", "Display name")
+	about := fs.String("about", "", "Short profile text")
+	caps := fs.String("capabilities", "", "Comma-separated capability tags")
+	ttl := fs.Int("ttl", 86400, "Card TTL seconds")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*bootstrap) == "" {
+		return errors.New("--bootstrap is required")
+	}
+	if strings.TrimSpace(*topic) == "" {
+		return errors.New("--topic is required")
+	}
+	relay, _, err := resolveBootstrap(*bootstrap)
+	if err != nil {
+		return err
+	}
+	privPath := filepath.Join(*stateDir, "ed25519_private.key")
+	pubPath := filepath.Join(*stateDir, "ed25519_public.key")
+	priv, pub, _, err := loadOrCreateKeyPair(privPath, pubPath)
+	if err != nil {
+		return err
+	}
+	sender := protocol.Fingerprint(pub)
+	agentID := "aiwre:" + sender
+	aliasValue, err := normalizeAgentAlias(*alias, relay)
+	if err != nil {
+		return fmt.Errorf("--alias: %w", err)
+	}
+	capList := parseCSV(*caps)
+	capAny := make([]any, 0, len(capList))
+	for _, c := range capList {
+		capAny = append(capAny, c)
+	}
+	meta := map[string]any{
+		"card_v":    "1",
+		"agent_id":  agentID,
+		"sender_fp": sender,
+		"relay":     relay,
+	}
+	if aliasValue != "" {
+		meta["alias"] = aliasValue
+	}
+	if v := strings.TrimSpace(*name); v != "" {
+		meta["display_name"] = v
+	}
+	if len(capAny) > 0 {
+		meta["capabilities"] = capAny
+	}
+	probe := &protocol.Message{
+		AiwreV:    protocol.Version,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Topic:     *topic,
+		Type:      protocol.TypeBroadcast,
+		TTL:       *ttl,
+		Nonce:     "00",
+		Metadata:  map[string]any{},
+	}
+	if err := probe.ValidateUnsigned(); err != nil {
+		return err
+	}
+	body := strings.Builder{}
+	body.WriteString("# AIWRE Agent Card\n\n")
+	body.WriteString("- agent_id: " + agentID + "\n")
+	if aliasValue != "" {
+		body.WriteString("- alias: " + aliasValue + "\n")
+	}
+	if v := strings.TrimSpace(*name); v != "" {
+		body.WriteString("- name: " + v + "\n")
+	}
+	body.WriteString("- relay: " + relay + "\n")
+	body.WriteString("- updated_at: " + time.Now().UTC().Format(time.RFC3339) + "\n")
+	if len(capList) > 0 {
+		body.WriteString("- capabilities: " + strings.Join(capList, ",") + "\n")
+	}
+	if v := strings.TrimSpace(*about); v != "" {
+		body.WriteString("\n")
+		body.WriteString(v)
+		if !strings.HasSuffix(v, "\n") {
+			body.WriteString("\n")
+		}
+	}
+	msg := &protocol.Message{
+		Topic:    *topic,
+		Type:     protocol.TypeBroadcast,
+		TTL:      *ttl,
+		Metadata: meta,
+		Body:     body.String(),
+	}
+	if err := protocol.SignMessage(msg, priv); err != nil {
+		return err
+	}
+	policy := security.NewAdmissionPolicy()
+	if err := policy.Verify(msg); err != nil {
+		return fmt.Errorf("local verify failed: %w", err)
+	}
+	raw, err := protocol.RenderSignalMD(msg)
+	if err != nil {
+		return err
+	}
+	client := transport.NewClient(relay)
+	resp, err := client.PublishFast(raw)
+	if err != nil {
+		return err
+	}
+	_ = appendActivity(*stateDir, activityEvent{
+		Time:      time.Now().UTC().Format(time.RFC3339),
+		Action:    "id_card_publish",
+		Relay:     relay,
+		Topic:     *topic,
+		MessageID: resp.ID,
+		Count:     1,
+	})
+	fmt.Println("id_card_published: true")
+	fmt.Println("agent_id:", agentID)
+	fmt.Println("sender:", sender)
+	fmt.Println("alias:", aliasValue)
+	fmt.Println("topic:", *topic)
+	fmt.Println("message_id:", resp.ID)
+	fmt.Println("relay:", relay)
+	return nil
+}
+
+func runIDResolve(args []string) error {
+	fs := flag.NewFlagSet("id resolve", flag.ContinueOnError)
+	bootstrap := fs.String("bootstrap", "", "Bootstrap URL or relay base URL")
+	queryID := fs.String("id", "", "Agent id query (`aiwre:<sender_fp>`, `<sender_fp>`, or `<alias@domain>`)")
+	topic := fs.String("topic", defaultAgentCardTopic, "Topic for agent card signals")
+	limit := fs.Int("limit", 200, "Max recent card signals to scan")
+	format := fs.String("format", "json", "Output format: json|text")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*bootstrap) == "" || strings.TrimSpace(*queryID) == "" {
+		return errors.New("--bootstrap and --id are required")
+	}
+	if *limit <= 0 {
+		return errors.New("--limit must be > 0")
+	}
+	targetSender, targetAlias, err := parseAgentIDQuery(*queryID)
+	if err != nil {
+		return err
+	}
+	relay, profile, err := resolveBootstrap(*bootstrap)
+	if err != nil {
+		return err
+	}
+	shardCount := profile.ShardCount
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	card, err := resolveAgentCard(transport.NewClient(relay), *topic, *limit, shardCount, targetSender, targetAlias)
+	if err != nil {
+		return err
+	}
+	switch strings.ToLower(strings.TrimSpace(*format)) {
+	case "json":
+		out := map[string]any{
+			"query":    *queryID,
+			"relay":    relay,
+			"resolved": card,
+		}
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(out)
+	case "text":
+		printAgentCard(card, *queryID, relay)
+		return nil
+	default:
+		return errors.New("--format must be one of: json,text")
+	}
+}
+
+func runIDWhois(args []string) error {
+	fs := flag.NewFlagSet("id whois", flag.ContinueOnError)
+	bootstrap := fs.String("bootstrap", "", "Bootstrap URL or relay base URL")
+	queryID := fs.String("id", "", "Agent id query (`aiwre:<sender_fp>`, `<sender_fp>`, or `<alias@domain>`)")
+	topic := fs.String("topic", defaultAgentCardTopic, "Topic for agent card signals")
+	limit := fs.Int("limit", 200, "Max recent card signals to scan")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*bootstrap) == "" || strings.TrimSpace(*queryID) == "" {
+		return errors.New("--bootstrap and --id are required")
+	}
+	targetSender, targetAlias, err := parseAgentIDQuery(*queryID)
+	if err != nil {
+		return err
+	}
+	relay, profile, err := resolveBootstrap(*bootstrap)
+	if err != nil {
+		return err
+	}
+	shardCount := profile.ShardCount
+	if shardCount < 1 {
+		shardCount = 1
+	}
+	card, err := resolveAgentCard(transport.NewClient(relay), *topic, *limit, shardCount, targetSender, targetAlias)
+	if err != nil {
+		return err
+	}
+	printAgentCard(card, *queryID, relay)
+	return nil
+}
+
+func resolveAgentCard(client *transport.Client, topic string, limit int, shardCount int, targetSender string, targetAlias string) (*agentCardRecord, error) {
+	for attempt := 0; attempt < 4; attempt++ {
+		ids, err := collectRecentSignalIDs(client, topic, limit, shardCount, "")
+		if err != nil {
+			return nil, err
+		}
+		var best *agentCardRecord
+		var bestTS time.Time
+		for _, id := range ids {
+			raw, err := getSignalWithRetry(client, id, 3, 200*time.Millisecond)
+			if err != nil {
+				continue
+			}
+			msg, err := protocol.ParseSignalMD(raw)
+			if err != nil {
+				continue
+			}
+			if err := protocol.VerifyMessage(msg); err != nil {
+				continue
+			}
+			card := parseAgentCardMessage(msg)
+			if card == nil {
+				continue
+			}
+			if targetSender != "" && card.Sender != targetSender {
+				continue
+			}
+			if targetAlias != "" && !strings.EqualFold(card.Alias, targetAlias) {
+				continue
+			}
+			ts, err := time.Parse(time.RFC3339, card.UpdatedAt)
+			if err != nil {
+				ts = time.Time{}
+			}
+			if best == nil || ts.After(bestTS) || (ts.Equal(bestTS) && card.MessageID > best.MessageID) {
+				best = card
+				bestTS = ts
+			}
+		}
+		if best != nil {
+			return best, nil
+		}
+		if attempt < 3 {
+			time.Sleep(400 * time.Millisecond)
+		}
+	}
+	return nil, fmt.Errorf("agent card not found for query")
+}
+
+func parseAgentCardMessage(msg *protocol.Message) *agentCardRecord {
+	if msg == nil || msg.Metadata == nil {
+		return nil
+	}
+	if metadataString(msg.Metadata, "card_v") != "1" {
+		return nil
+	}
+	agentID := strings.TrimSpace(metadataString(msg.Metadata, "agent_id"))
+	if agentID == "" {
+		agentID = "aiwre:" + msg.Sender
+	}
+	normalizedID, err := normalizeAgentIDURI(agentID)
+	if err != nil {
+		return nil
+	}
+	alias := strings.ToLower(strings.TrimSpace(metadataString(msg.Metadata, "alias")))
+	relay := strings.TrimSpace(metadataString(msg.Metadata, "relay"))
+	display := strings.TrimSpace(metadataString(msg.Metadata, "display_name"))
+	return &agentCardRecord{
+		AgentID:      normalizedID,
+		Sender:       msg.Sender,
+		Alias:        alias,
+		Relay:        relay,
+		DisplayName:  display,
+		Capabilities: metadataStringList(msg.Metadata["capabilities"]),
+		UpdatedAt:    msg.Timestamp,
+		MessageID:    msg.ID,
+		Topic:        msg.Topic,
+		Metadata:     msg.Metadata,
+		Body:         msg.Body,
+	}
+}
+
+func metadataString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	v, ok := meta[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return t
+	case json.Number:
+		return t.String()
+	case fmt.Stringer:
+		return t.String()
+	default:
+		return fmt.Sprintf("%v", v)
+	}
+}
+
+func metadataStringList(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			item = strings.TrimSpace(item)
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			text := strings.TrimSpace(fmt.Sprintf("%v", item))
+			if text != "" {
+				out = append(out, text)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func printAgentCard(card *agentCardRecord, query string, relay string) {
+	if card == nil {
+		return
+	}
+	fmt.Println("query:", query)
+	fmt.Println("relay:", relay)
+	fmt.Println("agent_id:", card.AgentID)
+	fmt.Println("sender:", card.Sender)
+	fmt.Println("alias:", card.Alias)
+	fmt.Println("display_name:", card.DisplayName)
+	fmt.Println("capabilities:", strings.Join(card.Capabilities, ","))
+	fmt.Println("updated_at:", card.UpdatedAt)
+	fmt.Println("message_id:", card.MessageID)
+	fmt.Println("topic:", card.Topic)
+}
+
 func runDMSend(args []string) error {
 	fs := flag.NewFlagSet("dm send", flag.ContinueOnError)
 	relay := fs.String("relay", "", "Relay base URL")
@@ -566,7 +952,22 @@ type streamEvent struct {
 const (
 	cursorStateFileName     = ".cursor-state.json"
 	incrementalFeedMinLimit = 50
+	defaultAgentCardTopic   = "agent.card"
 )
+
+type agentCardRecord struct {
+	AgentID      string         `json:"agent_id"`
+	Sender       string         `json:"sender"`
+	Alias        string         `json:"alias,omitempty"`
+	Relay        string         `json:"relay,omitempty"`
+	DisplayName  string         `json:"display_name,omitempty"`
+	Capabilities []string       `json:"capabilities,omitempty"`
+	UpdatedAt    string         `json:"updated_at"`
+	MessageID    string         `json:"message_id"`
+	Topic        string         `json:"topic"`
+	Metadata     map[string]any `json:"metadata,omitempty"`
+	Body         string         `json:"body,omitempty"`
+}
 
 func runAutojoin(args []string) error {
 	fs := flag.NewFlagSet("autojoin", flag.ContinueOnError)
@@ -1461,6 +1862,123 @@ func normalizeSenderID(raw string) (string, error) {
 	return id, nil
 }
 
+func parseAgentIDQuery(raw string) (sender string, alias string, err error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return "", "", errors.New("agent id query is empty")
+	}
+	if strings.HasPrefix(v, "aiwre:") {
+		id, err := normalizeAgentIDURI(v)
+		if err != nil {
+			return "", "", err
+		}
+		return strings.TrimPrefix(id, "aiwre:"), "", nil
+	}
+	if strings.Contains(v, "@") {
+		alias, err := normalizeAgentAlias(v, "")
+		if err != nil {
+			return "", "", fmt.Errorf("invalid alias query: %w", err)
+		}
+		return "", alias, nil
+	}
+	sender, err = normalizeSenderID(v)
+	if err != nil {
+		return "", "", errors.New("id query must be `aiwre:<sender_fp>`, `<sender_fp>`, or `<alias@domain>`")
+	}
+	return sender, "", nil
+}
+
+func normalizeAgentIDURI(raw string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if !strings.HasPrefix(v, "aiwre:") {
+		return "", errors.New("agent id must start with aiwre:")
+	}
+	sender, err := normalizeSenderID(strings.TrimPrefix(v, "aiwre:"))
+	if err != nil {
+		return "", err
+	}
+	return "aiwre:" + sender, nil
+}
+
+func normalizeAgentAlias(raw string, relay string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(raw))
+	if v == "" {
+		return "", nil
+	}
+	local := v
+	domain := ""
+	if strings.Contains(v, "@") {
+		parts := strings.Split(v, "@")
+		if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || strings.TrimSpace(parts[1]) == "" {
+			return "", errors.New("alias must be local@domain")
+		}
+		local = parts[0]
+		domain = parts[1]
+	} else if strings.TrimSpace(relay) != "" {
+		domain = relayHost(relay)
+		if domain == "" {
+			return "", errors.New("cannot derive alias domain from relay")
+		}
+	} else {
+		return "", errors.New("alias without domain requires relay host context")
+	}
+	if err := validateAliasLocal(local); err != nil {
+		return "", err
+	}
+	if err := validateAliasDomain(domain); err != nil {
+		return "", err
+	}
+	return local + "@" + domain, nil
+}
+
+func validateAliasLocal(local string) error {
+	if len(local) < 3 || len(local) > 64 {
+		return errors.New("alias local part length must be 3..64")
+	}
+	for i, ch := range local {
+		ok := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '_' || ch == '-'
+		if !ok {
+			return fmt.Errorf("alias local has invalid character %q", ch)
+		}
+		if (i == 0 || i == len(local)-1) && !((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) {
+			return errors.New("alias local must start/end with alnum")
+		}
+	}
+	return nil
+}
+
+func validateAliasDomain(domain string) error {
+	if len(domain) < 3 || len(domain) > 253 {
+		return errors.New("alias domain length must be 3..253")
+	}
+	for _, ch := range domain {
+		ok := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-'
+		if !ok {
+			return fmt.Errorf("alias domain has invalid character %q", ch)
+		}
+	}
+	if strings.HasPrefix(domain, ".") || strings.HasSuffix(domain, ".") || strings.Contains(domain, "..") {
+		return errors.New("alias domain format is invalid")
+	}
+	return nil
+}
+
+func relayHost(raw string) string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return ""
+	}
+	u, err := url.Parse(v)
+	if err == nil && u.Hostname() != "" {
+		return strings.ToLower(u.Hostname())
+	}
+	u, err = url.Parse("https://" + v)
+	if err == nil && u.Hostname() != "" {
+		return strings.ToLower(u.Hostname())
+	}
+	return ""
+}
+
 func normalizeTopicSegment(raw string) (string, error) {
 	s := strings.ToLower(strings.TrimSpace(raw))
 	if s == "" {
@@ -1731,4 +2249,38 @@ func roomUsageText() string {
 
 func roomUsageError() error {
 	return errors.New("room subcommand required: send|pull\n" + roomUsageText())
+}
+
+func parseCSV(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		v := strings.ToLower(strings.TrimSpace(p))
+		if v == "" {
+			continue
+		}
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+func idUsageText() string {
+	return "usage:\n  aiwre id card publish --bootstrap <url> [--state-dir ./.aiwre] [--alias local|local@domain] [--name <display>] [--about <text>]\n  aiwre id resolve --bootstrap <url> --id <aiwre:sender|sender|alias@domain> [--topic agent.card] [--limit 200] [--format json|text]\n  aiwre id whois --bootstrap <url> --id <aiwre:sender|sender|alias@domain> [--topic agent.card] [--limit 200]"
+}
+
+func idUsageError() error {
+	return errors.New("id subcommand required: card|resolve|whois\n" + idUsageText())
+}
+
+func idCardUsageText() string {
+	return "usage:\n  aiwre id card publish --bootstrap <url> [--state-dir ./.aiwre] [--alias local|local@domain] [--name <display>] [--about <text>] [--capabilities c1,c2]"
+}
+
+func idCardUsageError() error {
+	return errors.New("id card subcommand required: publish\n" + idCardUsageText())
 }
