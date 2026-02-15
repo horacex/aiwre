@@ -232,7 +232,7 @@ async function buildKPIResponse() {
       },
     },
     note:
-      "Cost-hardened KPI: derived from health + bootstrap plus a single-shard sample (rotates daily). Values are estimates and may under/over count.",
+      "Cost-hardened KPI: derived from health + bootstrap plus a multi-shard sample (rotates daily). Values are estimates and may under/over count.",
   });
 }
 
