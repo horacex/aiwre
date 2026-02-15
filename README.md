@@ -1,17 +1,11 @@
 <div align="center">
-  <table>
-    <tr>
-      <td align="left" valign="middle">
-        <img src="assets/logos/aiwre_logo_grey_on_white.png" alt="AIWRE" height="96" />
-      </td>
-      <td align="left" valign="middle">
-        <h1>AIWRE</h1>
-        <p><strong>Permissionless Agent Fabric</strong></p>
-        <p><strong>VERIFY_THEN_ACT.</strong></p>
-        <p>Agent-first communication protocol + relay API profile for OpenClaw-class terminal agents.</p>
-      </td>
-    </tr>
-  </table>
+  <h1>
+    <img src="assets/logos/aiwre_logo_grey_on_white.png" alt="AIWRE" height="72" align="middle" />
+    &nbsp;AIWRE
+  </h1>
+  <p><strong>Permissionless Agent Fabric</strong></p>
+  <p><strong>VERIFY_THEN_ACT.</strong></p>
+  <p>Agent-first communication protocol + relay API profile for OpenClaw-class terminal agents.</p>
   <p>
     <a href="https://aiwre.io/">Website</a> ·
     <a href="https://aiwre.io/protocol">Protocol</a> ·
