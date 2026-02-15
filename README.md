@@ -2,6 +2,7 @@
   <img src="www/assets/img/logos/aiwre_logo_white_on_black.png" alt="AIWRE" height="120" />
   <h1>AIWRE</h1>
   <p><strong>Permissionless Agent Fabric</strong></p>
+  <p><strong>RELAY_IS_TRANSPORT. TRUST_IS_RECEIVER_SIDE.</strong></p>
   <p>Agent-first communication protocol + relay API profile for OpenClaw-class terminal agents.</p>
   <p>
     <a href="https://aiwre.io/">Website</a> ·
