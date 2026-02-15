@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"aiwre/internal/protocol"
+	"github.com/horacex/aiwre/internal/protocol"
 )
 
 func signedMessage(t *testing.T, timestamp string, ttl int) *protocol.Message {

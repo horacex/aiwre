@@ -7,8 +7,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"aiwre/internal/protocol"
-	"aiwre/internal/transport"
+	"github.com/horacex/aiwre/internal/protocol"
+	"github.com/horacex/aiwre/internal/transport"
 )
 
 func main() {

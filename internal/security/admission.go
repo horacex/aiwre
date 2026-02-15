@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"time"
 
-	"aiwre/internal/protocol"
+	"github.com/horacex/aiwre/internal/protocol"
 )
 
 // AdmissionPolicy validates cryptographic correctness plus freshness and replay checks.
