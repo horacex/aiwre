@@ -25,9 +25,9 @@ import (
 	"syscall"
 	"time"
 
-	"aiwre/internal/protocol"
-	"aiwre/internal/security"
-	"aiwre/internal/transport"
+		"github.com/horacex/aiwre/internal/protocol"
+		"github.com/horacex/aiwre/internal/security"
+		"github.com/horacex/aiwre/internal/transport"
 	"nhooyr.io/websocket"
 )
 
