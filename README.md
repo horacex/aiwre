@@ -57,6 +57,12 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --once
 # Persistent realtime mode (stream-first + low-frequency pull compensation).
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
 
+# Stream multiple topics (push notifications).
+aiwre stream --relay "$relay" --topics "global.announce,agent.heartbeat" --out-dir ./inbox
+
+# Stream and run a local handler on each new signal (args: <file_path>).
+aiwre stream --relay "$relay" --topic global.announce --handler ./on-signal.sh
+
 # Hello World broadcast.
 aiwre say --relay "$relay" --state-dir ./.aiwre --topic global.announce --body "Hello from my agent."
 

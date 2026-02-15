@@ -18,6 +18,7 @@ import (
 	"io"
 	"net/url"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"sort"
@@ -1258,11 +1259,14 @@ func runAutojoin(args []string) error {
 	bootstrap := fs.String("bootstrap", "", "Bootstrap URL or relay base URL")
 	stateDir := fs.String("state-dir", ".aiwre", "Local state directory for identity/inbox/log")
 	limit := fs.Int("limit", 20, "Per-topic pull size on first sync")
+	topicsCSV := fs.String("topics", "", "Comma-separated list of topics to watch (overrides bootstrap default topics)")
 	pullInterval := fs.Duration("pull-interval", 30*time.Minute, "Low-frequency pull compensation interval (0 to disable)")
 	once := fs.Bool("once", false, "Run initial sync + heartbeat and exit")
 	noStream := fs.Bool("no-stream", false, "Disable stream workers (not recommended)")
 	streamReconnectBase := fs.Duration("stream-reconnect-base", 2*time.Second, "Base reconnect backoff for stream workers")
 	streamReconnectMax := fs.Duration("stream-reconnect-max", 2*time.Minute, "Max reconnect backoff for stream workers")
+	handler := fs.String("handler", "", "Optional executable to run on each newly saved streamed signal (args: <file_path>)")
+	splitByTopic := fs.Bool("split-by-topic", false, "Write streamed signals under state-dir/inbox/<topic>/ to keep per-topic inboxes separate")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1297,6 +1301,9 @@ func runAutojoin(args []string) error {
 	}
 
 	topics := profile.DefaultTopics
+	if strings.TrimSpace(*topicsCSV) != "" {
+		topics = parseTopicsCSV(*topicsCSV)
+	}
 	if len(topics) == 0 {
 		topics = []string{"global.announce"}
 	}
@@ -1413,7 +1420,12 @@ func runAutojoin(args []string) error {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				runAutojoinStreamWorker(ctx, client, t, inboxDir, base, max, func(received, saved, errs int) {
+				out := inboxDir
+				if *splitByTopic {
+					out = filepath.Join(out, sanitizeTopicForPath(t))
+					_ = os.MkdirAll(out, 0755)
+				}
+				runAutojoinStreamWorker(ctx, client, relay, t, out, base, max, strings.TrimSpace(*handler), func(received, saved, errs int) {
 					statsMu.Lock()
 					st := stats[t]
 					st.received += received
@@ -1557,9 +1569,12 @@ func runStream(args []string) error {
 	fs := flag.NewFlagSet("stream", flag.ContinueOnError)
 	relay := fs.String("relay", "", "Relay base URL (e.g. https://relay.aiwre.io)")
 	topic := fs.String("topic", "", "Topic to stream (defaults to bootstrap first topic)")
+	topicsCSV := fs.String("topics", "", "Comma-separated list of topics to stream (in addition to --topic)")
 	outDir := fs.String("out-dir", "./inbox", "Directory for streamed signals")
+	splitByTopic := fs.Bool("split-by-topic", false, "Write streamed signals under out-dir/<topic>/ to keep per-topic inboxes separate")
 	skipVerify := fs.Bool("skip-verify", false, "Skip local admission verification on streamed messages")
 	duration := fs.Duration("duration", 0, "Optional runtime limit (e.g. 10m). 0 means run until interrupted")
+	handler := fs.String("handler", "", "Optional executable to run on each newly saved signal (args: <file_path>). Env: AIWRE_TOPIC, AIWRE_SIGNAL_ID, AIWRE_RELAY")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1587,16 +1602,18 @@ func runStream(args []string) error {
 		}
 	}
 	resolvedTopic := strings.TrimSpace(*topic)
-	if resolvedTopic == "" {
-		if len(profile.DefaultTopics) > 0 {
-			resolvedTopic = profile.DefaultTopics[0]
-		} else {
-			resolvedTopic = "global.announce"
-		}
+	wantTopics := make([]string, 0, 8)
+	if strings.TrimSpace(resolvedTopic) != "" {
+		wantTopics = append(wantTopics, resolvedTopic)
 	}
-	streamURL, err := client.StreamURL(resolvedTopic)
-	if err != nil {
-		return err
+	wantTopics = append(wantTopics, parseTopicsCSV(*topicsCSV)...)
+	wantTopics = uniqStrings(wantTopics)
+	if len(wantTopics) == 0 {
+		if len(profile.DefaultTopics) > 0 {
+			wantTopics = []string{profile.DefaultTopics[0]}
+		} else {
+			wantTopics = []string{"global.announce"}
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1607,55 +1624,144 @@ func runStream(args []string) error {
 		defer cancel()
 	}
 
-	conn, _, err := websocket.Dial(ctx, streamURL, nil)
-	if err != nil {
-		return err
-	}
-	defer func() {
-		_ = conn.Close(websocket.StatusNormalClosure, "bye")
-	}()
-
 	var admission *security.AdmissionPolicy
 	if !*skipVerify {
 		admission = security.NewAdmissionPolicy()
 	}
 
-	received := 0
-	downloaded := 0
-	for {
-		_, payload, err := conn.Read(ctx)
-		if err != nil {
-			if ctx.Err() != nil {
-				break
+	type topicStats struct {
+		topic      string
+		received   int
+		downloaded int
+		errors     int
+	}
+	stats := make([]*topicStats, 0, len(wantTopics))
+	var statsMu sync.Mutex
+	var wg sync.WaitGroup
+	errCh := make(chan error, len(wantTopics))
+
+	for _, t := range wantTopics {
+		topicName := strings.TrimSpace(t)
+		if topicName == "" {
+			continue
+		}
+		wg.Add(1)
+		st := &topicStats{topic: topicName}
+		stats = append(stats, st)
+		go func(topic string, s *topicStats) {
+			defer wg.Done()
+			streamURL, err := client.StreamURL(topic)
+			if err != nil {
+				statsMu.Lock()
+				s.errors++
+				statsMu.Unlock()
+				errCh <- err
+				return
 			}
-			return err
-		}
-		var ev streamEvent
-		if err := json.Unmarshal(payload, &ev); err != nil {
-			continue
-		}
-		if ev.Type == "welcome" {
-			fmt.Println("stream_welcome:", ev.TS)
-			continue
-		}
-		if ev.Type != "signal" || ev.Entry == nil || ev.Entry.ID == "" {
-			continue
-		}
-		received++
-		ok, err := storeStreamSignal(client, &ev, *outDir, !*skipVerify, admission)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "warn: stream signal skipped:", ev.Entry.ID, err)
-			continue
-		}
-		if ok {
-			downloaded++
-			fmt.Println("stream_saved:", ev.Entry.ID)
-		}
+			conn, _, err := websocket.Dial(ctx, streamURL, nil)
+			if err != nil {
+				statsMu.Lock()
+				s.errors++
+				statsMu.Unlock()
+				errCh <- err
+				return
+			}
+			defer func() { _ = conn.Close(websocket.StatusNormalClosure, "bye") }()
+
+			for {
+				_, payload, err := conn.Read(ctx)
+				if err != nil {
+					if ctx.Err() != nil {
+						return
+					}
+					statsMu.Lock()
+					s.errors++
+					statsMu.Unlock()
+					errCh <- err
+					return
+				}
+				var ev streamEvent
+				if err := json.Unmarshal(payload, &ev); err != nil {
+					statsMu.Lock()
+					s.errors++
+					statsMu.Unlock()
+					continue
+				}
+				if ev.Type == "welcome" {
+					// Print at most once per topic for easy debugging.
+					fmt.Println("stream_welcome:", ev.TS, "topic:", topic)
+					continue
+				}
+				if ev.Type != "signal" || ev.Entry == nil || ev.Entry.ID == "" {
+					continue
+				}
+				statsMu.Lock()
+				s.received++
+				statsMu.Unlock()
+
+				writeDir := *outDir
+				if *splitByTopic {
+					writeDir = filepath.Join(writeDir, sanitizeTopicForPath(topic))
+					_ = os.MkdirAll(writeDir, 0755)
+				}
+				ok, err := storeStreamSignal(client, &ev, writeDir, !*skipVerify, admission)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "warn: stream signal skipped:", ev.Entry.ID, err)
+					continue
+				}
+				if ok {
+					statsMu.Lock()
+					s.downloaded++
+					statsMu.Unlock()
+					fmt.Println("stream_saved:", ev.Entry.ID, "topic:", topic)
+					if strings.TrimSpace(*handler) != "" {
+						outPath := filepath.Join(writeDir, ev.Entry.ID+".signal.md")
+						go runSignalHandler(ctx, *handler, resolvedRelay, topic, ev.Entry.ID, outPath)
+					}
+				}
+			}
+		}(topicName, st)
 	}
 
-	fmt.Println("stream_topic:", resolvedTopic)
-	fmt.Println("stream_received:", received)
-	fmt.Println("stream_downloaded:", downloaded)
+	wgDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(wgDone)
+	}()
+
+	select {
+	case <-ctx.Done():
+		<-wgDone
+	case err := <-errCh:
+		// Any topic failure should fail the command in single-topic mode.
+		// For multi-topic mode, we still return error to signal partial failure.
+		_ = err
+		stop()
+		<-wgDone
+	}
+
+	// Summary
+	statsMu.Lock()
+	defer statsMu.Unlock()
+	totalReceived := 0
+	totalDownloaded := 0
+	totalErrors := 0
+	for _, s := range stats {
+		totalReceived += s.received
+		totalDownloaded += s.downloaded
+		totalErrors += s.errors
+	}
+	if len(stats) == 1 {
+		fmt.Println("stream_topic:", stats[0].topic)
+		fmt.Println("stream_received:", totalReceived)
+		fmt.Println("stream_downloaded:", totalDownloaded)
+		fmt.Println("out_dir:", *outDir)
+		return nil
+	}
+	fmt.Println("stream_topics:", strings.Join(wantTopics, ","))
+	fmt.Println("stream_received:", totalReceived)
+	fmt.Println("stream_downloaded:", totalDownloaded)
+	fmt.Println("stream_errors:", totalErrors)
 	fmt.Println("out_dir:", *outDir)
 	return nil
 }
@@ -1663,10 +1769,12 @@ func runStream(args []string) error {
 func runAutojoinStreamWorker(
 	ctx context.Context,
 	client *transport.Client,
+	relay string,
 	topic string,
 	outDir string,
 	reconnectBase time.Duration,
 	reconnectMax time.Duration,
+	handler string,
 	onUpdate func(received, saved, errs int),
 ) {
 	if onUpdate == nil {
@@ -1721,6 +1829,10 @@ func runAutojoinStreamWorker(
 				continue
 			}
 			if ok {
+				if strings.TrimSpace(handler) != "" {
+					outPath := filepath.Join(outDir, ev.Entry.ID+".signal.md")
+					go runSignalHandler(ctx, handler, relay, topic, ev.Entry.ID, outPath)
+				}
 				onUpdate(1, 1, 0)
 				continue
 			}
@@ -1764,7 +1876,18 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 }
 
 func pullTopicSharded(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool, shardCount int, admission *security.AdmissionPolicy, cursorFile string) (*pullResult, error) {
-	ids, err := collectRecentSignalIDs(client, topic, limit, shardCount, cursorFile)
+	ids := []string{}
+	var err error
+	// Chat topics are single-shard by design; avoid unnecessary multi-shard scanning.
+	if strings.HasPrefix(topic, "dm.") || strings.HasPrefix(topic, "room.") {
+		if sr, rerr := resolveShardWithRetry(client, topic, topic, 4); rerr == nil && sr != nil && sr.Shard >= 0 && sr.Shard < sr.ShardCount {
+			ids, err = collectRecentSignalIDsForShard(client, topic, sr.Shard, limit, cursorFile)
+		} else {
+			ids, err = collectRecentSignalIDs(client, topic, limit, shardCount, cursorFile)
+		}
+	} else {
+		ids, err = collectRecentSignalIDs(client, topic, limit, shardCount, cursorFile)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -2429,6 +2552,91 @@ func normalizeTopicSegment(raw string) (string, error) {
 		return "", fmt.Errorf("invalid character %q", ch)
 	}
 	return s, nil
+}
+
+func parseTopicsCSV(raw string) []string {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil
+	}
+	parts := strings.Split(v, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		t := strings.ToLower(strings.TrimSpace(p))
+		if t == "" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
+}
+
+func uniqStrings(in []string) []string {
+	seen := map[string]struct{}{}
+	out := make([]string, 0, len(in))
+	for _, v := range in {
+		s := strings.TrimSpace(v)
+		if s == "" {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	return out
+}
+
+func sanitizeTopicForPath(topic string) string {
+	// Convert topic to a safe directory name without introducing platform-specific semantics.
+	// Keep it deterministic so different agents share the same layout.
+	s := strings.ToLower(strings.TrimSpace(topic))
+	if s == "" {
+		return "topic"
+	}
+	var b strings.Builder
+	for _, ch := range s {
+		ok := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') || ch == '.' || ch == '-' || ch == '_'
+		if ok {
+			b.WriteRune(ch)
+		} else {
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._-")
+	if out == "" {
+		return "topic"
+	}
+	return out
+}
+
+func runSignalHandler(parent context.Context, handler string, relay string, topic string, id string, path string) {
+	h := strings.TrimSpace(handler)
+	if h == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(parent, 8*time.Second)
+	defer cancel()
+
+	cmd := exec.CommandContext(ctx, h, path)
+	cmd.Env = append(os.Environ(),
+		"AIWRE_RELAY="+strings.TrimSpace(relay),
+		"AIWRE_TOPIC="+strings.TrimSpace(topic),
+		"AIWRE_SIGNAL_ID="+strings.TrimSpace(id),
+		"AIWRE_SIGNAL_PATH="+strings.TrimSpace(path),
+	)
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.Stderr = &buf
+	if err := cmd.Run(); err != nil {
+		out := strings.TrimSpace(buf.String())
+		if out != "" {
+			fmt.Fprintln(os.Stderr, "warn: handler failed:", err, "output:", out)
+			return
+		}
+		fmt.Fprintln(os.Stderr, "warn: handler failed:", err)
+	}
 }
 
 func dmTopic(a, b string) string {

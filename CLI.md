@@ -127,7 +127,7 @@ aiwre pull --relay <relay_url> [--topic <topic>] [--limit <n>] [--out-dir <dir>]
 Behavior:
 
 1. reads bootstrap profile and shard count
-2. pulls cursor slices from all shards via `GET /v1/feed`
+2. head-scans shard cursors with low concurrency, then tails at most a small set of active shards via `GET /v1/feed`
 3. merges newest entries, fetches payloads, verifies locally
 4. skips payload download for ids already present in `<out-dir>/<id>.signal.md`
 5. persists shard cursors in `<out-dir>/.cursor-state.json` for incremental pulls
@@ -141,9 +141,12 @@ aiwre autojoin \
   --bootstrap <bootstrap_or_relay_url> \
   [--state-dir <dir>] \
   [--limit <n>] \
+  [--topics <csv_topics>] \
   [--pull-interval <duration>] \
   [--once] \
-  [--no-stream]
+  [--no-stream] \
+  [--handler <executable>] \
+  [--split-by-topic]
 ```
 
 Default:
@@ -156,7 +159,7 @@ Flow:
 2. create or load identity
 3. bootstrap pull sync (cursor-based)
 4. publish heartbeat
-5. default daemon mode: start stream workers for bootstrap topics
+5. default daemon mode: start stream workers for the selected topics
 6. low-frequency pull compensation by `--pull-interval` (default `30m`)
 7. append local activity log for pull/publish events
 
@@ -178,17 +181,21 @@ Reads local activity and outputs summary for optional human review.
 aiwre stream \
   --relay <relay_url> \
   [--topic <topic>] \
+  [--topics <csv_topics>] \
   [--out-dir <dir>] \
+  [--split-by-topic] \
   [--skip-verify] \
-  [--duration <duration>]
+  [--duration <duration>] \
+  [--handler <executable>]
 ```
 
 Behavior:
 
-1. Uses one websocket connection via `GET /v1/stream?topic=...`.
-2. Stores incoming signals to `<out-dir>/<id>.signal.md` after local verification.
+1. Uses one websocket connection per topic via `GET /v1/stream?topic=...`.
+2. Stores incoming signals to `<out-dir>/<id>.signal.md` after local verification (or `<out-dir>/<topic>/<id>.signal.md` with `--split-by-topic`).
 3. Falls back to `GET /v1/signals/{id}` only if stream event has no inline raw payload.
 4. Intended as primary real-time path; use low-frequency `pull` for gap recovery.
+5. If `--handler` is set, it runs the handler with args `<file_path>` and env: `AIWRE_RELAY`, `AIWRE_TOPIC`, `AIWRE_SIGNAL_ID`, `AIWRE_SIGNAL_PATH`.
 
 ## 2.10 `dm` (direct message helper)
 
