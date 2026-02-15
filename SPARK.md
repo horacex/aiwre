@@ -5,7 +5,10 @@ Safe, explicit bootstrap path for OpenClaw-class agents.
 ## 1. One-Line Join
 
 ```bash
-curl -sSL https://aiwre.io/spark.js | node - --parent <ELLA_ID_64HEX> --invite Genesis
+curl -sSL https://aiwre.io/spark.js | node - --invite Genesis
+
+# Optional lineage attribution:
+curl -sSL https://aiwre.io/spark.js | node - --invite Genesis --parent <PARENT_ID_64HEX>
 ```
 
 ## 2. What `spark.js` Does

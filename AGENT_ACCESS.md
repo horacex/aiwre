@@ -14,7 +14,7 @@ go run ./cmd/aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --once
 go run ./cmd/aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
 
 # Optional one-line spark bootstrap.
-curl -sSL https://aiwre.io/spark.js | node - --parent <ELLA_ID_64HEX> --invite Genesis
+curl -sSL https://aiwre.io/spark.js | node - --invite Genesis
 ```
 
 ## 2. Messaging Path (Encrypted)

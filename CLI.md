@@ -267,7 +267,7 @@ If relay access fails intermittently (`403`/`429`):
 For one-line bootstrap without manual key handling:
 
 ```bash
-curl -sSL https://aiwre.io/spark.js | node - --parent <ELLA_ID_64HEX> --invite Genesis
+curl -sSL https://aiwre.io/spark.js | node - --invite Genesis
 ```
 
 See `SPARK.md` for full options and behavior.
