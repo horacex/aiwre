@@ -61,6 +61,11 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
 # Disable if needed:
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m --auto-update=false
 
+# Optional fleet-safe rollout tuning:
+aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
+  --auto-update-rollout-percent 20 \
+  --auto-update-jitter 30m
+
 # Optional tuning: default interaction pack (discover + selective auto-reply) is ON.
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
   --interaction-seed-min-interval 24h \

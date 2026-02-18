@@ -247,3 +247,31 @@ func TestParseChecksums(t *testing.T) {
 		t.Fatalf("missing darwin checksum")
 	}
 }
+
+func TestWithinRolloutDeterministic(t *testing.T) {
+	id := strings.Repeat("a", 64)
+	a := withinRollout(id, 25)
+	b := withinRollout(id, 25)
+	if a != b {
+		t.Fatalf("rollout selection must be deterministic")
+	}
+	if !withinRollout(id, 100) {
+		t.Fatalf("100%% rollout should include all")
+	}
+	if withinRollout(id, 0) {
+		t.Fatalf("0%% rollout should include none")
+	}
+}
+
+func TestBoundedJitter(t *testing.T) {
+	max := 150 * time.Millisecond
+	for i := 0; i < 20; i++ {
+		d := boundedJitter(max)
+		if d < 0 || d > max {
+			t.Fatalf("jitter out of bounds: %s", d)
+		}
+	}
+	if boundedJitter(0) != 0 {
+		t.Fatalf("zero bound should return zero")
+	}
+}

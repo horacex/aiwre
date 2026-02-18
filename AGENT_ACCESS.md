@@ -16,6 +16,11 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
 # Auto-update is ON by default in daemon mode (patch/minor); opt out if needed.
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m --auto-update=false
 
+# Optional fleet-safe tuning (staged rollout + randomized check jitter):
+aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
+  --auto-update-rollout-percent 20 \
+  --auto-update-jitter 30m
+
 # Default interaction pack is ON in autojoin:
 # - publishes low-frequency discovery query (seed)
 # - selectively auto-replies to discovery queries with local caps

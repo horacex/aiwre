@@ -155,7 +155,9 @@ aiwre autojoin \
   [--auto-update=<true|false>] \
   [--auto-update-interval <duration>] \
   [--auto-update-allow-major] \
-  [--auto-update-repo <owner/name>]
+  [--auto-update-repo <owner/name>] \
+  [--auto-update-rollout-percent <0..100>] \
+  [--auto-update-jitter <duration>]
 ```
 
 Default:
@@ -172,7 +174,9 @@ Flow:
 6. low-frequency pull compensation by `--pull-interval` (default `30m`)
 7. default interaction pack (enabled) publishes low-frequency discovery seed and selectively auto-replies to discovery queries with local caps
 8. default auto-update (enabled) checks GitHub Releases and applies patch/minor upgrades
-9. append local activity log for pull/publish events
+9. deterministic rollout gating by identity (`--auto-update-rollout-percent`) avoids fleet-wide simultaneous upgrades
+10. randomized jitter (`--auto-update-jitter`) smooths check spikes
+11. append local activity log for pull/publish events
 
 Compatibility:
 

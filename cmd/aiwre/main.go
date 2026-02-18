@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"net/url"
 	"os"
@@ -1319,6 +1320,7 @@ const (
 	cursorStateFileName      = ".cursor-state.json"
 	interactionStateFileName = ".interaction-state.json"
 	updateStateFileName      = ".update-state.json"
+	updateLockFileName       = ".update.lock"
 	incrementalFeedMinLimit  = 50
 	defaultAgentCardTopic    = "agent.card"
 	defaultUpdateRepo        = "horacex/aiwre"
@@ -1360,6 +1362,8 @@ func runAutojoin(args []string) error {
 	autoUpdateInterval := fs.Duration("auto-update-interval", 24*time.Hour, "Interval for automatic update checks")
 	autoUpdateAllowMajor := fs.Bool("auto-update-allow-major", false, "Allow automatic major version upgrades")
 	autoUpdateRepo := fs.String("auto-update-repo", defaultUpdateRepo, "GitHub repo used for self-updates (owner/name)")
+	autoUpdateRollout := fs.Int("auto-update-rollout-percent", 100, "Deterministic rollout percentage [0..100] by agent identity")
+	autoUpdateJitter := fs.Duration("auto-update-jitter", 15*time.Minute, "Randomized delay added before each periodic update check")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1565,10 +1569,12 @@ func runAutojoin(args []string) error {
 	}
 	if *autoUpdate && *autoUpdateInterval > 0 {
 		fmt.Println("auto_update_interval:", autoUpdateInterval.String())
+		fmt.Println("auto_update_rollout_percent:", *autoUpdateRollout)
+		fmt.Println("auto_update_jitter:", autoUpdateJitter.String())
 	}
 
 	if *autoUpdate {
-		applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), *autoUpdateAllowMajor, false)
+		applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), protocol.Fingerprint(pub), *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "warn: auto-update check failed:", err)
 		}
@@ -1633,7 +1639,7 @@ func runAutojoin(args []string) error {
 				})
 			}
 		case <-updateC:
-			applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), *autoUpdateAllowMajor, true)
+			applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), protocol.Fingerprint(pub), *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, true)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "warn: auto-update tick failed:", err)
 				continue
@@ -3647,27 +3653,130 @@ type updateState struct {
 	UpdatedAt          string `json:"updated_at"`
 	LastCheckedAt      string `json:"last_checked_at,omitempty"`
 	LastAppliedVersion string `json:"last_applied_version,omitempty"`
+	LastOutcome        string `json:"last_outcome,omitempty"`
+	LastNote           string `json:"last_note,omitempty"`
 }
 
-func maybeAutoUpdate(stateDir, repo, currentVersion string, allowMajor bool, tick bool) (bool, error) {
+func maybeAutoUpdate(stateDir, repo, currentVersion, nodeID string, allowMajor bool, rolloutPercent int, jitter time.Duration, tick bool) (bool, error) {
 	if !isSemver(currentVersion) {
 		return false, nil
 	}
-	res, err := applyUpdate(repo, currentVersion, allowMajor, 25*time.Second)
-	st := loadUpdateState(filepath.Join(stateDir, updateStateFileName))
-	now := time.Now().UTC().Format(time.RFC3339)
-	st.LastCheckedAt = now
-	if err == nil && res.Applied {
-		st.LastAppliedVersion = res.LatestVersion
+	statePath := filepath.Join(stateDir, updateStateFileName)
+	st := loadUpdateState(statePath)
+	st.LastCheckedAt = time.Now().UTC().Format(time.RFC3339)
+
+	if !withinRollout(nodeID, rolloutPercent) {
+		st.LastOutcome = "skipped"
+		st.LastNote = "outside rollout cohort"
+		_ = saveUpdateState(statePath, st)
+		return false, nil
 	}
-	_ = saveUpdateState(filepath.Join(stateDir, updateStateFileName), st)
+
+	if tick && jitter > 0 {
+		delay := boundedJitter(jitter)
+		if delay > 0 {
+			time.Sleep(delay)
+		}
+	}
+
+	applied, err := withUpdateLock(stateDir, func() (bool, error) {
+		res, applyErr := applyUpdate(repo, currentVersion, allowMajor, 25*time.Second)
+		if applyErr != nil {
+			return false, applyErr
+		}
+		if tick && res.Reason != "" {
+			fmt.Println("auto_update_note:", res.Reason)
+		}
+		if res.Applied {
+			st.LastAppliedVersion = res.LatestVersion
+			st.LastOutcome = "applied"
+			st.LastNote = ""
+			return true, nil
+		}
+		st.LastOutcome = "no_change"
+		st.LastNote = res.Reason
+		return false, nil
+	})
 	if err != nil {
+		st.LastOutcome = "error"
+		st.LastNote = err.Error()
+		_ = saveUpdateState(statePath, st)
 		return false, err
 	}
-	if tick && res.Reason != "" {
-		fmt.Println("auto_update_note:", res.Reason)
+	_ = saveUpdateState(statePath, st)
+	return applied, nil
+}
+
+func withinRollout(nodeID string, percent int) bool {
+	if percent >= 100 {
+		return true
 	}
-	return res.Applied, nil
+	if percent <= 0 {
+		return false
+	}
+	key := strings.ToLower(strings.TrimSpace(nodeID))
+	if key == "" {
+		if hn, err := os.Hostname(); err == nil {
+			key = strings.ToLower(strings.TrimSpace(hn))
+		}
+	}
+	if key == "" {
+		return true
+	}
+	sum := sha256.Sum256([]byte(key))
+	bucket := int(binary.BigEndian.Uint32(sum[:4])%100) + 1
+	return bucket <= percent
+}
+
+func boundedJitter(max time.Duration) time.Duration {
+	if max <= 0 {
+		return 0
+	}
+	nMax := max.Nanoseconds()
+	if nMax <= 0 {
+		return 0
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(nMax+1))
+	if err != nil {
+		return time.Duration(time.Now().UnixNano() % (nMax + 1))
+	}
+	return time.Duration(n.Int64())
+}
+
+func withUpdateLock(stateDir string, fn func() (bool, error)) (bool, error) {
+	lockPath := filepath.Join(strings.TrimSpace(stateDir), updateLockFileName)
+	if strings.TrimSpace(lockPath) == "" {
+		lockPath = filepath.Join(".aiwre", updateLockFileName)
+	}
+	if err := os.MkdirAll(filepath.Dir(lockPath), 0755); err != nil {
+		return false, err
+	}
+
+	openLock := func() (*os.File, error) {
+		return os.OpenFile(lockPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	}
+
+	f, err := openLock()
+	if err != nil && os.IsExist(err) {
+		if st, statErr := os.Stat(lockPath); statErr == nil {
+			// Best-effort stale lock cleanup (e.g., crashed process).
+			if time.Since(st.ModTime()) > 6*time.Hour {
+				_ = os.Remove(lockPath)
+				f, err = openLock()
+			}
+		}
+	}
+	if err != nil {
+		if os.IsExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	_, _ = fmt.Fprintf(f, "%d\n%s\n", os.Getpid(), time.Now().UTC().Format(time.RFC3339))
+	_ = f.Close()
+	defer os.Remove(lockPath)
+
+	return fn()
 }
 
 func checkForUpdate(repo, currentVersion string, allowMajor bool, timeout time.Duration) (*updateCheckResult, error) {
@@ -4112,7 +4221,33 @@ func installExecutable(newBinaryPath string) (string, error) {
 		_ = os.Remove(tmpPath)
 		return "", err
 	}
+	if err := verifyExecutableHealth(exe); err != nil {
+		_ = os.Rename(exe, tmpPath)
+		_ = os.Rename(backupPath, exe)
+		_ = os.Remove(tmpPath)
+		return "", fmt.Errorf("post-update health check failed: %w", err)
+	}
 	return exe, nil
+}
+
+func verifyExecutableHealth(exe string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, exe, "version")
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+	if err := cmd.Run(); err != nil {
+		msg := strings.TrimSpace(out.String())
+		if msg != "" {
+			return fmt.Errorf("%w (%s)", err, msg)
+		}
+		return err
+	}
+	if !strings.Contains(strings.ToLower(out.String()), "version:") {
+		return errors.New("unexpected version output")
+	}
+	return nil
 }
 
 func restartSelf(args []string) error {
