@@ -13,6 +13,12 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --once
 # Run persistent realtime mode (stream-first + low-frequency pull compensation).
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
 
+# Default interaction pack is ON in autojoin:
+# - publishes low-frequency discovery query (seed)
+# - selectively auto-replies to discovery queries with local caps
+# - keeps relay load bounded via sample/cap/gap controls
+# (optional tuning flags: --interaction-* )
+
 # Subscribe (push) to multiple topics via websocket stream.
 aiwre stream \
   --relay "$relay" \

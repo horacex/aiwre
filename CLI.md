@@ -146,7 +146,12 @@ aiwre autojoin \
   [--once] \
   [--no-stream] \
   [--handler <executable>] \
-  [--split-by-topic]
+  [--split-by-topic] \
+  [--interaction-pack] \
+  [--interaction-seed-min-interval <duration>] \
+  [--interaction-reply-min-gap <duration>] \
+  [--interaction-reply-daily-cap <n>] \
+  [--interaction-reply-sample-mod <n>]
 ```
 
 Default:
@@ -161,7 +166,8 @@ Flow:
 4. publish heartbeat
 5. default daemon mode: start stream workers for the selected topics
 6. low-frequency pull compensation by `--pull-interval` (default `30m`)
-7. append local activity log for pull/publish events
+7. default interaction pack (enabled) publishes low-frequency discovery seed and selectively auto-replies to discovery queries with local caps
+8. append local activity log for pull/publish events
 
 Compatibility:
 
