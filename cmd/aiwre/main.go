@@ -1,8 +1,11 @@
 package main
 
 import (
+	"archive/tar"
+	"archive/zip"
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/aes"
 	"crypto/cipher"
@@ -17,14 +20,17 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
+	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
-	"strings"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -62,6 +68,8 @@ func main() {
 		err = runPull(os.Args[2:])
 	case "autojoin":
 		err = runAutojoin(os.Args[2:])
+	case "update":
+		err = runUpdate(os.Args[2:])
 	case "report":
 		err = runReport(os.Args[2:])
 	case "stream":
@@ -94,6 +102,7 @@ Commands:
   say      Sign + publish a plaintext broadcast (Hello World helper)
   pull     Pull recent signals from relay
   autojoin Zero-approval bootstrap + stream-first daemon
+  update   Check/apply CLI updates from GitHub releases
   report   Human-readable activity report
   stream   WebSocket push stream for one topic
   dm       Direct-message helper (send|pull)
@@ -115,6 +124,76 @@ func runVersion(_ []string) error {
 	}
 	if strings.TrimSpace(buildDate) != "" {
 		fmt.Println("built_at:", buildDate)
+	}
+	return nil
+}
+
+func runUpdate(args []string) error {
+	if len(args) < 1 {
+		return errors.New("update subcommand required: check|apply\n" + updateUsageText())
+	}
+	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	case "check":
+		return runUpdateCheck(args[1:])
+	case "apply":
+		return runUpdateApply(args[1:])
+	default:
+		return errors.New("invalid update subcommand: " + args[0] + "\n" + updateUsageText())
+	}
+}
+
+func runUpdateCheck(args []string) error {
+	fs := flag.NewFlagSet("update check", flag.ContinueOnError)
+	repo := fs.String("repo", defaultUpdateRepo, "GitHub repo in owner/name format")
+	allowMajor := fs.Bool("allow-major", false, "Whether to treat major upgrades as eligible updates")
+	current := fs.String("current", strings.TrimSpace(buildVersion), "Current version (default build version)")
+	timeout := fs.Duration("timeout", 12*time.Second, "HTTP timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	info, err := checkForUpdate(strings.TrimSpace(*repo), strings.TrimSpace(*current), *allowMajor, *timeout)
+	if err != nil {
+		return err
+	}
+	fmt.Println("repo:", strings.TrimSpace(*repo))
+	fmt.Println("current_version:", info.CurrentVersion)
+	fmt.Println("latest_version:", info.LatestVersion)
+	fmt.Println("update_available:", info.UpdateAvailable)
+	fmt.Println("release_url:", info.ReleaseURL)
+	if info.AssetName != "" {
+		fmt.Println("asset:", info.AssetName)
+	}
+	if info.Reason != "" {
+		fmt.Println("note:", info.Reason)
+	}
+	return nil
+}
+
+func runUpdateApply(args []string) error {
+	fs := flag.NewFlagSet("update apply", flag.ContinueOnError)
+	repo := fs.String("repo", defaultUpdateRepo, "GitHub repo in owner/name format")
+	allowMajor := fs.Bool("allow-major", false, "Allow major version auto-upgrade")
+	current := fs.String("current", strings.TrimSpace(buildVersion), "Current version (default build version)")
+	timeout := fs.Duration("timeout", 25*time.Second, "HTTP timeout")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	res, err := applyUpdate(strings.TrimSpace(*repo), strings.TrimSpace(*current), *allowMajor, *timeout)
+	if err != nil {
+		return err
+	}
+	fmt.Println("repo:", strings.TrimSpace(*repo))
+	fmt.Println("current_version:", res.CurrentVersion)
+	fmt.Println("latest_version:", res.LatestVersion)
+	fmt.Println("update_applied:", res.Applied)
+	if res.AssetName != "" {
+		fmt.Println("asset:", res.AssetName)
+	}
+	if res.Executable != "" {
+		fmt.Println("executable:", res.Executable)
+	}
+	if res.Reason != "" {
+		fmt.Println("note:", res.Reason)
 	}
 	return nil
 }
@@ -1239,8 +1318,10 @@ type streamEvent struct {
 const (
 	cursorStateFileName      = ".cursor-state.json"
 	interactionStateFileName = ".interaction-state.json"
+	updateStateFileName      = ".update-state.json"
 	incrementalFeedMinLimit  = 50
 	defaultAgentCardTopic    = "agent.card"
+	defaultUpdateRepo        = "horacex/aiwre"
 )
 
 type agentCardRecord struct {
@@ -1275,6 +1356,10 @@ func runAutojoin(args []string) error {
 	interactionReplyMinGap := fs.Duration("interaction-reply-min-gap", 90*time.Second, "Minimum gap between auto replies from this agent")
 	interactionReplyDailyCap := fs.Int("interaction-reply-daily-cap", 8, "Max number of auto replies per UTC day")
 	interactionReplySampleMod := fs.Int("interaction-reply-sample-mod", 32, "Selective reply sampling modulus (higher = fewer auto replies)")
+	autoUpdate := fs.Bool("auto-update", true, "Enable automatic CLI self-update checks in daemon mode")
+	autoUpdateInterval := fs.Duration("auto-update-interval", 24*time.Hour, "Interval for automatic update checks")
+	autoUpdateAllowMajor := fs.Bool("auto-update-allow-major", false, "Allow automatic major version upgrades")
+	autoUpdateRepo := fs.String("auto-update-repo", defaultUpdateRepo, "GitHub repo used for self-updates (owner/name)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1394,6 +1479,7 @@ func runAutojoin(args []string) error {
 	fmt.Println("downloaded:", totalDownloaded)
 	fmt.Println("heartbeat_id:", pubResp.ID)
 	fmt.Println("state_dir:", *stateDir)
+	fmt.Println("auto_update:", *autoUpdate)
 
 	var interaction *interactionRuntime
 	if *interactionPack {
@@ -1471,54 +1557,96 @@ func runAutojoin(args []string) error {
 		}
 	}
 
+	fmt.Println("runtime_mode:", "daemon")
 	if *pullInterval > 0 {
-		ticker := time.NewTicker(*pullInterval)
-		defer ticker.Stop()
-		fmt.Println("runtime_mode:", "daemon")
 		fmt.Println("pull_compensation_interval:", pullInterval.String())
-		for {
-			select {
-			case <-ctx.Done():
-				wg.Wait()
-				goto END
-			case <-ticker.C:
-				cycleAdmission := security.NewAdmissionPolicy()
-				for _, topic := range topics {
-					res, err := pullTopicSharded(
-						client,
-						topic,
-						*limit,
-						inboxDir,
-						true,
-						false,
-						shardCount,
-						cycleAdmission,
-						cursorStatePath(inboxDir),
-					)
-					if err != nil {
-						fmt.Fprintln(os.Stderr, "warn: pull compensation failed:", topic, err)
-						continue
-					}
-					if res.Downloaded > 0 {
-						fmt.Println("compensate_downloaded:", topic, res.Downloaded)
-					}
-					_ = appendActivity(*stateDir, activityEvent{
-						Time:   time.Now().UTC().Format(time.RFC3339),
-						Action: "pull",
-						Relay:  relay,
-						Topic:  topic,
-						Count:  res.Downloaded,
-						Detail: fmt.Sprintf("feed_count=%d mode=%s phase=compensate", res.Count, res.Mode),
-					})
-				}
+	} else {
+		fmt.Println("pull_compensation_interval:", "disabled")
+	}
+	if *autoUpdate && *autoUpdateInterval > 0 {
+		fmt.Println("auto_update_interval:", autoUpdateInterval.String())
+	}
+
+	if *autoUpdate {
+		applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), *autoUpdateAllowMajor, false)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "warn: auto-update check failed:", err)
+		}
+		if applied {
+			fmt.Println("auto_update_applied:", true)
+			if err := restartSelf(os.Args[1:]); err != nil {
+				fmt.Fprintln(os.Stderr, "warn: update applied but restart failed:", err)
 			}
+			return nil
 		}
 	}
 
-	fmt.Println("runtime_mode:", "daemon")
-	fmt.Println("pull_compensation_interval:", "disabled")
-	<-ctx.Done()
-	wg.Wait()
+	var pullTicker *time.Ticker
+	var pullC <-chan time.Time
+	if *pullInterval > 0 {
+		pullTicker = time.NewTicker(*pullInterval)
+		defer pullTicker.Stop()
+		pullC = pullTicker.C
+	}
+
+	var updateTicker *time.Ticker
+	var updateC <-chan time.Time
+	if *autoUpdate && *autoUpdateInterval > 0 {
+		updateTicker = time.NewTicker(*autoUpdateInterval)
+		defer updateTicker.Stop()
+		updateC = updateTicker.C
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			wg.Wait()
+			goto END
+		case <-pullC:
+			cycleAdmission := security.NewAdmissionPolicy()
+			for _, topic := range topics {
+				res, err := pullTopicSharded(
+					client,
+					topic,
+					*limit,
+					inboxDir,
+					true,
+					false,
+					shardCount,
+					cycleAdmission,
+					cursorStatePath(inboxDir),
+				)
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "warn: pull compensation failed:", topic, err)
+					continue
+				}
+				if res.Downloaded > 0 {
+					fmt.Println("compensate_downloaded:", topic, res.Downloaded)
+				}
+				_ = appendActivity(*stateDir, activityEvent{
+					Time:   time.Now().UTC().Format(time.RFC3339),
+					Action: "pull",
+					Relay:  relay,
+					Topic:  topic,
+					Count:  res.Downloaded,
+					Detail: fmt.Sprintf("feed_count=%d mode=%s phase=compensate", res.Count, res.Mode),
+				})
+			}
+		case <-updateC:
+			applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), *autoUpdateAllowMajor, true)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "warn: auto-update tick failed:", err)
+				continue
+			}
+			if applied {
+				fmt.Println("auto_update_applied:", true)
+				if err := restartSelf(os.Args[1:]); err != nil {
+					fmt.Fprintln(os.Stderr, "warn: update applied but restart failed:", err)
+				}
+				return nil
+			}
+		}
+	}
 
 END:
 	statsMu.Lock()
@@ -3465,6 +3593,638 @@ func (s *cursorState) set(topic string, shard int, cursor int64) {
 	}
 }
 
+type githubRelease struct {
+	TagName    string             `json:"tag_name"`
+	HTMLURL    string             `json:"html_url"`
+	Draft      bool               `json:"draft"`
+	Prerelease bool               `json:"prerelease"`
+	Assets     []githubAssetEntry `json:"assets"`
+}
+
+type githubAssetEntry struct {
+	Name string `json:"name"`
+	URL  string `json:"browser_download_url"`
+	Size int64  `json:"size"`
+}
+
+type updateCheckResult struct {
+	CurrentVersion  string
+	LatestVersion   string
+	ReleaseURL      string
+	AssetName       string
+	UpdateAvailable bool
+	Reason          string
+}
+
+type updateApplyResult struct {
+	CurrentVersion string
+	LatestVersion  string
+	AssetName      string
+	ReleaseURL     string
+	Executable     string
+	Applied        bool
+	Reason         string
+}
+
+type updateCandidate struct {
+	currentVersion string
+	latestVersion  string
+	releaseURL     string
+	asset          *githubAssetEntry
+	checksumAsset  *githubAssetEntry
+	eligible       bool
+	reason         string
+}
+
+type semVersion struct {
+	Major int
+	Minor int
+	Patch int
+}
+
+type updateState struct {
+	Version            int    `json:"version"`
+	UpdatedAt          string `json:"updated_at"`
+	LastCheckedAt      string `json:"last_checked_at,omitempty"`
+	LastAppliedVersion string `json:"last_applied_version,omitempty"`
+}
+
+func maybeAutoUpdate(stateDir, repo, currentVersion string, allowMajor bool, tick bool) (bool, error) {
+	if !isSemver(currentVersion) {
+		return false, nil
+	}
+	res, err := applyUpdate(repo, currentVersion, allowMajor, 25*time.Second)
+	st := loadUpdateState(filepath.Join(stateDir, updateStateFileName))
+	now := time.Now().UTC().Format(time.RFC3339)
+	st.LastCheckedAt = now
+	if err == nil && res.Applied {
+		st.LastAppliedVersion = res.LatestVersion
+	}
+	_ = saveUpdateState(filepath.Join(stateDir, updateStateFileName), st)
+	if err != nil {
+		return false, err
+	}
+	if tick && res.Reason != "" {
+		fmt.Println("auto_update_note:", res.Reason)
+	}
+	return res.Applied, nil
+}
+
+func checkForUpdate(repo, currentVersion string, allowMajor bool, timeout time.Duration) (*updateCheckResult, error) {
+	candidate, err := resolveUpdateCandidate(repo, currentVersion, allowMajor, timeout)
+	if err != nil {
+		return nil, err
+	}
+	out := &updateCheckResult{
+		CurrentVersion: candidate.currentVersion,
+		LatestVersion:  candidate.latestVersion,
+		ReleaseURL:     candidate.releaseURL,
+		Reason:         candidate.reason,
+	}
+	if candidate.asset != nil {
+		out.AssetName = candidate.asset.Name
+	}
+	out.UpdateAvailable = candidate.eligible && candidate.asset != nil
+	if candidate.eligible && candidate.asset == nil {
+		out.Reason = "update available but no matching release artifact for this platform"
+	}
+	return out, nil
+}
+
+func applyUpdate(repo, currentVersion string, allowMajor bool, timeout time.Duration) (*updateApplyResult, error) {
+	candidate, err := resolveUpdateCandidate(repo, currentVersion, allowMajor, timeout)
+	if err != nil {
+		return nil, err
+	}
+	out := &updateApplyResult{
+		CurrentVersion: candidate.currentVersion,
+		LatestVersion:  candidate.latestVersion,
+		ReleaseURL:     candidate.releaseURL,
+		Reason:         candidate.reason,
+	}
+	if candidate.asset != nil {
+		out.AssetName = candidate.asset.Name
+	}
+	if !candidate.eligible {
+		return out, nil
+	}
+	if candidate.asset == nil {
+		return out, errors.New("update available but no matching release artifact for this platform")
+	}
+	if candidate.checksumAsset == nil {
+		return out, errors.New("release is missing checksums asset; refusing unsafe self-update")
+	}
+
+	client := &http.Client{Timeout: timeout}
+	checksumRaw, err := downloadHTTPBytes(client, candidate.checksumAsset.URL, 2<<20)
+	if err != nil {
+		return out, fmt.Errorf("download checksums: %w", err)
+	}
+	hashByName := parseChecksums(string(checksumRaw))
+	expected := strings.ToLower(strings.TrimSpace(hashByName[candidate.asset.Name]))
+	if expected == "" {
+		return out, fmt.Errorf("checksums file does not include %s", candidate.asset.Name)
+	}
+
+	archivePath, err := downloadToTempFile(client, candidate.asset.URL, "aiwre-update-*")
+	if err != nil {
+		return out, fmt.Errorf("download artifact: %w", err)
+	}
+	defer os.Remove(archivePath)
+
+	actual, err := fileSHA256(archivePath)
+	if err != nil {
+		return out, err
+	}
+	if actual != expected {
+		return out, fmt.Errorf("checksum mismatch for %s", candidate.asset.Name)
+	}
+
+	binaryPath, err := extractBinaryFromArtifact(archivePath, candidate.asset.Name)
+	if err != nil {
+		return out, err
+	}
+	if binaryPath != archivePath {
+		defer os.Remove(binaryPath)
+	}
+
+	exe, err := installExecutable(binaryPath)
+	if err != nil {
+		return out, err
+	}
+	out.Executable = exe
+	out.Applied = true
+	out.Reason = ""
+	return out, nil
+}
+
+func resolveUpdateCandidate(repo, currentVersion string, allowMajor bool, timeout time.Duration) (*updateCandidate, error) {
+	repo = strings.TrimSpace(repo)
+	if repo == "" {
+		return nil, errors.New("repo is required")
+	}
+	if timeout <= 0 {
+		timeout = 12 * time.Second
+	}
+	current := strings.TrimSpace(currentVersion)
+	if current == "" {
+		current = "dev"
+	}
+	release, err := fetchLatestRelease(repo, timeout)
+	if err != nil {
+		return nil, err
+	}
+	latest := normalizeVersionLabel(release.TagName)
+	candidate := &updateCandidate{
+		currentVersion: current,
+		latestVersion:  latest,
+		releaseURL:     strings.TrimSpace(release.HTMLURL),
+	}
+
+	if !isSemver(current) {
+		candidate.reason = "current build is non-semver; skip automatic update"
+		return candidate, nil
+	}
+	if !isSemver(latest) {
+		return nil, fmt.Errorf("latest release tag is not semver: %s", release.TagName)
+	}
+	curSem, _ := parseSemver(current)
+	latestSem, _ := parseSemver(latest)
+	cmp := compareSemver(latestSem, curSem)
+	if cmp <= 0 {
+		candidate.reason = "already up to date"
+		return candidate, nil
+	}
+	if !allowMajor && latestSem.Major > curSem.Major {
+		candidate.reason = "major update available but major auto-upgrades are disabled"
+		return candidate, nil
+	}
+	asset := pickReleaseAsset(release.Assets, runtime.GOOS, runtime.GOARCH)
+	checksumAsset := pickChecksumAsset(release.Assets)
+	candidate.asset = asset
+	candidate.checksumAsset = checksumAsset
+	candidate.eligible = true
+	return candidate, nil
+}
+
+func fetchLatestRelease(repo string, timeout time.Duration) (*githubRelease, error) {
+	client := &http.Client{Timeout: timeout}
+	url := "https://api.github.com/repos/" + strings.TrimSpace(repo) + "/releases/latest"
+	body, err := downloadHTTPBytes(client, url, 2<<20)
+	if err != nil {
+		return nil, err
+	}
+	var rel githubRelease
+	if err := json.Unmarshal(body, &rel); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(rel.TagName) == "" {
+		return nil, errors.New("release tag is missing")
+	}
+	return &rel, nil
+}
+
+func pickReleaseAsset(assets []githubAssetEntry, goos, goarch string) *githubAssetEntry {
+	tokenA := "_" + strings.ToLower(strings.TrimSpace(goos)) + "_" + strings.ToLower(strings.TrimSpace(goarch))
+	tokenB := "-" + strings.ToLower(strings.TrimSpace(goos)) + "-" + strings.ToLower(strings.TrimSpace(goarch))
+	binaryName := "aiwre"
+	if strings.EqualFold(goos, "windows") {
+		binaryName = "aiwre.exe"
+	}
+
+	var best *githubAssetEntry
+	bestScore := -1
+	for i := range assets {
+		name := strings.ToLower(strings.TrimSpace(assets[i].Name))
+		if name == "" {
+			continue
+		}
+		if strings.Contains(name, "checksums") || strings.Contains(name, ".sig") || strings.Contains(name, "sbom") {
+			continue
+		}
+		if !strings.Contains(name, tokenA) && !strings.Contains(name, tokenB) {
+			continue
+		}
+		score := 1
+		if strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz") {
+			score = 3
+		} else if strings.HasSuffix(name, ".zip") {
+			score = 2
+		} else if filepath.Base(name) == binaryName {
+			score = 4
+		}
+		if score > bestScore {
+			best = &assets[i]
+			bestScore = score
+		}
+	}
+	return best
+}
+
+func pickChecksumAsset(assets []githubAssetEntry) *githubAssetEntry {
+	for i := range assets {
+		name := strings.ToLower(strings.TrimSpace(assets[i].Name))
+		if name == "" {
+			continue
+		}
+		if strings.Contains(name, "checksums") && strings.HasSuffix(name, ".txt") {
+			return &assets[i]
+		}
+	}
+	return nil
+}
+
+func parseChecksums(raw string) map[string]string {
+	out := map[string]string{}
+	sc := bufio.NewScanner(strings.NewReader(raw))
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		hash := strings.ToLower(strings.TrimSpace(fields[0]))
+		if len(hash) != 64 {
+			continue
+		}
+		name := strings.TrimSpace(fields[len(fields)-1])
+		name = strings.TrimPrefix(name, "*")
+		name = filepath.Base(name)
+		if name == "" {
+			continue
+		}
+		out[name] = hash
+	}
+	return out
+}
+
+func downloadHTTPBytes(client *http.Client, uri string, maxBytes int64) ([]byte, error) {
+	if client == nil {
+		client = &http.Client{Timeout: 12 * time.Second}
+	}
+	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "aiwre-cli/"+strings.TrimSpace(buildVersion))
+	req.Header.Set("Accept", "application/json,application/octet-stream;q=0.9,*/*;q=0.8")
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	if maxBytes <= 0 {
+		maxBytes = 8 << 20
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errors.New("response exceeds size limit")
+	}
+	return data, nil
+}
+
+func downloadToTempFile(client *http.Client, uri, pattern string) (string, error) {
+	req, err := http.NewRequest(http.MethodGet, uri, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("User-Agent", "aiwre-cli/"+strings.TrimSpace(buildVersion))
+	req.Header.Set("Accept", "application/octet-stream,*/*;q=0.8")
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return "", fmt.Errorf("http %d: %s", resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	tmp, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", err
+	}
+	defer tmp.Close()
+	if _, err := io.Copy(tmp, io.LimitReader(resp.Body, 300<<20)); err != nil {
+		_ = os.Remove(tmp.Name())
+		return "", err
+	}
+	return tmp.Name(), nil
+}
+
+func fileSHA256(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func extractBinaryFromArtifact(archivePath, assetName string) (string, error) {
+	name := strings.ToLower(strings.TrimSpace(assetName))
+	if strings.HasSuffix(name, ".tar.gz") || strings.HasSuffix(name, ".tgz") {
+		return extractTarGzBinary(archivePath)
+	}
+	if strings.HasSuffix(name, ".zip") {
+		return extractZipBinary(archivePath)
+	}
+	return archivePath, nil
+}
+
+func extractTarGzBinary(archivePath string) (string, error) {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return "", err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	want := "aiwre"
+	if runtime.GOOS == "windows" {
+		want = "aiwre.exe"
+	}
+	for {
+		hdr, err := tr.Next()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			return "", err
+		}
+		if hdr == nil || hdr.Typeflag != tar.TypeReg {
+			continue
+		}
+		if path.Base(strings.TrimSpace(hdr.Name)) != want {
+			continue
+		}
+		tmp, err := os.CreateTemp("", "aiwre-bin-*")
+		if err != nil {
+			return "", err
+		}
+		if _, err := io.Copy(tmp, tr); err != nil {
+			tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return "", err
+		}
+		_ = tmp.Chmod(0755)
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmp.Name())
+			return "", err
+		}
+		return tmp.Name(), nil
+	}
+	return "", errors.New("aiwre binary not found in tar.gz artifact")
+}
+
+func extractZipBinary(archivePath string) (string, error) {
+	r, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	want := "aiwre"
+	if runtime.GOOS == "windows" {
+		want = "aiwre.exe"
+	}
+	for _, f := range r.File {
+		if path.Base(strings.TrimSpace(f.Name)) != want {
+			continue
+		}
+		rc, err := f.Open()
+		if err != nil {
+			return "", err
+		}
+		tmp, err := os.CreateTemp("", "aiwre-bin-*")
+		if err != nil {
+			rc.Close()
+			return "", err
+		}
+		if _, err := io.Copy(tmp, rc); err != nil {
+			rc.Close()
+			tmp.Close()
+			_ = os.Remove(tmp.Name())
+			return "", err
+		}
+		rc.Close()
+		_ = tmp.Chmod(0755)
+		if err := tmp.Close(); err != nil {
+			_ = os.Remove(tmp.Name())
+			return "", err
+		}
+		return tmp.Name(), nil
+	}
+	return "", errors.New("aiwre binary not found in zip artifact")
+}
+
+func installExecutable(newBinaryPath string) (string, error) {
+	exe, err := os.Executable()
+	if err != nil {
+		return "", err
+	}
+	exe = strings.TrimSpace(exe)
+	if exe == "" {
+		return "", errors.New("executable path is empty")
+	}
+	targetMode := os.FileMode(0755)
+	if st, statErr := os.Stat(exe); statErr == nil {
+		targetMode = st.Mode().Perm()
+		if targetMode == 0 {
+			targetMode = 0755
+		}
+	}
+	raw, err := os.ReadFile(newBinaryPath)
+	if err != nil {
+		return "", err
+	}
+	tmpPath := exe + ".new"
+	backupPath := exe + ".bak"
+	if err := os.WriteFile(tmpPath, raw, targetMode); err != nil {
+		return "", err
+	}
+	if err := os.Remove(backupPath); err != nil && !os.IsNotExist(err) {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := os.Rename(exe, backupPath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	if err := os.Rename(tmpPath, exe); err != nil {
+		_ = os.Rename(backupPath, exe)
+		_ = os.Remove(tmpPath)
+		return "", err
+	}
+	return exe, nil
+}
+
+func restartSelf(args []string) error {
+	exe, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	cmd.Stdin = os.Stdin
+	cmd.Env = os.Environ()
+	if err := cmd.Start(); err != nil {
+		return err
+	}
+	fmt.Println("restarted_pid:", cmd.Process.Pid)
+	os.Exit(0)
+	return nil
+}
+
+func parseSemver(v string) (semVersion, bool) {
+	s := normalizeVersionLabel(v)
+	base := s
+	if i := strings.IndexAny(base, "-+"); i >= 0 {
+		base = base[:i]
+	}
+	parts := strings.Split(base, ".")
+	if len(parts) != 3 {
+		return semVersion{}, false
+	}
+	major, err := strconv.Atoi(parts[0])
+	if err != nil {
+		return semVersion{}, false
+	}
+	minor, err := strconv.Atoi(parts[1])
+	if err != nil {
+		return semVersion{}, false
+	}
+	patch, err := strconv.Atoi(parts[2])
+	if err != nil {
+		return semVersion{}, false
+	}
+	return semVersion{Major: major, Minor: minor, Patch: patch}, true
+}
+
+func normalizeVersionLabel(v string) string {
+	out := strings.TrimSpace(strings.TrimPrefix(strings.ToLower(strings.TrimSpace(v)), "v"))
+	return out
+}
+
+func isSemver(v string) bool {
+	_, ok := parseSemver(v)
+	return ok
+}
+
+func compareSemver(a, b semVersion) int {
+	if a.Major != b.Major {
+		if a.Major > b.Major {
+			return 1
+		}
+		return -1
+	}
+	if a.Minor != b.Minor {
+		if a.Minor > b.Minor {
+			return 1
+		}
+		return -1
+	}
+	if a.Patch != b.Patch {
+		if a.Patch > b.Patch {
+			return 1
+		}
+		return -1
+	}
+	return 0
+}
+
+func loadUpdateState(path string) *updateState {
+	out := &updateState{Version: 1}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var parsed updateState
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return out
+	}
+	if parsed.Version == 0 {
+		parsed.Version = 1
+	}
+	return &parsed
+}
+
+func saveUpdateState(path string, state *updateState) error {
+	if strings.TrimSpace(path) == "" || state == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 func safeTimestamp(raw string) string {
 	if raw == "" {
 		return "unknown"
@@ -3489,6 +4249,10 @@ func roomUsageText() string {
 
 func roomUsageError() error {
 	return errors.New("room subcommand required: send|pull\n" + roomUsageText())
+}
+
+func updateUsageText() string {
+	return "usage:\n  aiwre update check [--repo horacex/aiwre] [--allow-major]\n  aiwre update apply [--repo horacex/aiwre] [--allow-major]"
 }
 
 func parseCSV(raw string) []string {

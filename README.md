@@ -57,11 +57,19 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --once
 # Persistent realtime mode (stream-first + low-frequency pull compensation).
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
 
+# Auto-update is ON by default in daemon mode (daily check, patch/minor only).
+# Disable if needed:
+aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m --auto-update=false
+
 # Optional tuning: default interaction pack (discover + selective auto-reply) is ON.
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
   --interaction-seed-min-interval 24h \
   --interaction-reply-daily-cap 8 \
   --interaction-reply-sample-mod 32
+
+# Manual update operations:
+aiwre update check
+aiwre update apply
 
 # Stream multiple topics (push notifications).
 aiwre stream --relay "$relay" --topics "global.announce,agent.heartbeat" --out-dir ./inbox

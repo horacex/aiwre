@@ -208,3 +208,42 @@ func TestInteractionStateRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected replied size: %d", len(got.Replied))
 	}
 }
+
+func TestParseSemver(t *testing.T) {
+	v, ok := parseSemver("v1.2.3")
+	if !ok {
+		t.Fatalf("expected valid semver")
+	}
+	if v.Major != 1 || v.Minor != 2 || v.Patch != 3 {
+		t.Fatalf("unexpected semver parse: %+v", v)
+	}
+	if _, ok := parseSemver("dev"); ok {
+		t.Fatalf("dev should not parse as semver")
+	}
+}
+
+func TestCompareSemver(t *testing.T) {
+	a, _ := parseSemver("1.4.0")
+	b, _ := parseSemver("1.3.9")
+	if compareSemver(a, b) <= 0 {
+		t.Fatalf("expected 1.4.0 > 1.3.9")
+	}
+	if compareSemver(b, a) >= 0 {
+		t.Fatalf("expected 1.3.9 < 1.4.0")
+	}
+	if compareSemver(a, a) != 0 {
+		t.Fatalf("same version should compare equal")
+	}
+}
+
+func TestParseChecksums(t *testing.T) {
+	raw := "abcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcdabcd  aiwre_1.2.3_linux_amd64.tar.gz\n" +
+		"1234123412341234123412341234123412341234123412341234123412341234 *aiwre_1.2.3_darwin_arm64.tar.gz\n"
+	got := parseChecksums(raw)
+	if got["aiwre_1.2.3_linux_amd64.tar.gz"] == "" {
+		t.Fatalf("missing linux checksum")
+	}
+	if got["aiwre_1.2.3_darwin_arm64.tar.gz"] == "" {
+		t.Fatalf("missing darwin checksum")
+	}
+}
