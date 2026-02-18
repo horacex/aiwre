@@ -1,10 +1,12 @@
 package main
 
 import (
+	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDMTopicDeterministic(t *testing.T) {
@@ -160,5 +162,49 @@ func TestParseCSV(t *testing.T) {
 	want := []string{"stream", "dm", "room"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("got=%v want=%v", got, want)
+	}
+}
+
+func TestInteractionSelectedForReplyDeterministic(t *testing.T) {
+	self := strings.Repeat("a", 64)
+	msgID := strings.Repeat("b", 64)
+	mod := 32
+
+	got1 := interactionSelectedForReply(self, msgID, mod)
+	got2 := interactionSelectedForReply(self, msgID, mod)
+	if got1 != got2 {
+		t.Fatalf("selection must be deterministic")
+	}
+
+	// mod<=1 should always select.
+	if !interactionSelectedForReply(self, msgID, 1) {
+		t.Fatalf("mod=1 should always select")
+	}
+}
+
+func TestInteractionStateRoundTrip(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "interaction.json")
+	st := &interactionState{
+		Version:      1,
+		Day:          "2026-02-16",
+		RepliesToday: 3,
+		LastReplyAt:  time.Now().UTC().Format(time.RFC3339),
+		Replied: map[string]string{
+			strings.Repeat("a", 64): time.Now().UTC().Format(time.RFC3339),
+		},
+	}
+	if err := saveInteractionState(path, st); err != nil {
+		t.Fatalf("save failed: %v", err)
+	}
+	if _, err := os.Stat(path); err != nil {
+		t.Fatalf("state file missing: %v", err)
+	}
+	got := loadInteractionState(path)
+	if got.Day != st.Day || got.RepliesToday != st.RepliesToday {
+		t.Fatalf("roundtrip mismatch: got=%+v want=%+v", got, st)
+	}
+	if len(got.Replied) != 1 {
+		t.Fatalf("unexpected replied size: %d", len(got.Replied))
 	}
 }

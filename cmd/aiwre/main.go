@@ -10,6 +10,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -23,6 +24,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -1235,9 +1237,10 @@ type streamEvent struct {
 }
 
 const (
-	cursorStateFileName     = ".cursor-state.json"
-	incrementalFeedMinLimit = 50
-	defaultAgentCardTopic   = "agent.card"
+	cursorStateFileName      = ".cursor-state.json"
+	interactionStateFileName = ".interaction-state.json"
+	incrementalFeedMinLimit  = 50
+	defaultAgentCardTopic    = "agent.card"
 )
 
 type agentCardRecord struct {
@@ -1267,6 +1270,11 @@ func runAutojoin(args []string) error {
 	streamReconnectMax := fs.Duration("stream-reconnect-max", 2*time.Minute, "Max reconnect backoff for stream workers")
 	handler := fs.String("handler", "", "Optional executable to run on each newly saved streamed signal (args: <file_path>)")
 	splitByTopic := fs.Bool("split-by-topic", false, "Write streamed signals under state-dir/inbox/<topic>/ to keep per-topic inboxes separate")
+	interactionPack := fs.Bool("interaction-pack", true, "Enable built-in low-cost interaction pack (discover + selective auto-reply)")
+	interactionSeedMinInterval := fs.Duration("interaction-seed-min-interval", 24*time.Hour, "Minimum interval between auto discovery seed query publishes")
+	interactionReplyMinGap := fs.Duration("interaction-reply-min-gap", 90*time.Second, "Minimum gap between auto replies from this agent")
+	interactionReplyDailyCap := fs.Int("interaction-reply-daily-cap", 8, "Max number of auto replies per UTC day")
+	interactionReplySampleMod := fs.Int("interaction-reply-sample-mod", 32, "Selective reply sampling modulus (higher = fewer auto replies)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1386,6 +1394,26 @@ func runAutojoin(args []string) error {
 	fmt.Println("downloaded:", totalDownloaded)
 	fmt.Println("heartbeat_id:", pubResp.ID)
 	fmt.Println("state_dir:", *stateDir)
+
+	var interaction *interactionRuntime
+	if *interactionPack {
+		interaction = newInteractionRuntime(
+			relay,
+			*stateDir,
+			protocol.Fingerprint(pub),
+			priv,
+			*interactionSeedMinInterval,
+			*interactionReplyMinGap,
+			*interactionReplyDailyCap,
+			*interactionReplySampleMod,
+		)
+		if seedID, seeded, seedErr := interaction.maybeSeedDiscovery(client); seedErr != nil {
+			fmt.Fprintln(os.Stderr, "warn: interaction seed failed:", seedErr)
+		} else if seeded {
+			fmt.Println("interaction_seed_id:", seedID)
+		}
+	}
+	fmt.Println("interaction_pack:", *interactionPack)
 	if *once {
 		fmt.Println("runtime_mode:", "once")
 		return nil
@@ -1425,7 +1453,13 @@ func runAutojoin(args []string) error {
 					out = filepath.Join(out, sanitizeTopicForPath(t))
 					_ = os.MkdirAll(out, 0755)
 				}
-				runAutojoinStreamWorker(ctx, client, relay, t, out, base, max, strings.TrimSpace(*handler), func(received, saved, errs int) {
+				var onSaved func(topic, id, path string)
+				if interaction != nil {
+					onSaved = func(sigTopic, id, path string) {
+						_ = interaction.maybeAutoReplyFromPath(client, sigTopic, id, path)
+					}
+				}
+				runAutojoinStreamWorker(ctx, client, relay, t, out, base, max, strings.TrimSpace(*handler), onSaved, func(received, saved, errs int) {
 					statsMu.Lock()
 					st := stats[t]
 					st.received += received
@@ -1775,10 +1809,14 @@ func runAutojoinStreamWorker(
 	reconnectBase time.Duration,
 	reconnectMax time.Duration,
 	handler string,
+	onSaved func(topic, id, path string),
 	onUpdate func(received, saved, errs int),
 ) {
 	if onUpdate == nil {
 		onUpdate = func(int, int, int) {}
+	}
+	if onSaved == nil {
+		onSaved = func(string, string, string) {}
 	}
 	streamURL, err := client.StreamURL(topic)
 	if err != nil {
@@ -1829,8 +1867,9 @@ func runAutojoinStreamWorker(
 				continue
 			}
 			if ok {
+				outPath := filepath.Join(outDir, ev.Entry.ID+".signal.md")
+				onSaved(topic, ev.Entry.ID, outPath)
 				if strings.TrimSpace(handler) != "" {
-					outPath := filepath.Join(outDir, ev.Entry.ID+".signal.md")
 					go runSignalHandler(ctx, handler, relay, topic, ev.Entry.ID, outPath)
 				}
 				onUpdate(1, 1, 0)
@@ -2637,6 +2676,398 @@ func runSignalHandler(parent context.Context, handler string, relay string, topi
 		}
 		fmt.Fprintln(os.Stderr, "warn: handler failed:", err)
 	}
+}
+
+type interactionRuntime struct {
+	mu              sync.Mutex
+	relay           string
+	stateDir        string
+	statePath       string
+	selfID          string
+	priv            ed25519.PrivateKey
+	seedMinInterval time.Duration
+	replyMinGap     time.Duration
+	replyDailyCap   int
+	replySampleMod  int
+	state           *interactionState
+}
+
+type interactionState struct {
+	Version      int               `json:"version"`
+	UpdatedAt    string            `json:"updated_at"`
+	Day          string            `json:"day"`
+	RepliesToday int               `json:"replies_today"`
+	LastReplyAt  string            `json:"last_reply_at,omitempty"`
+	LastSeedAt   string            `json:"last_seed_at,omitempty"`
+	Replied      map[string]string `json:"replied,omitempty"`
+}
+
+func newInteractionRuntime(relay, stateDir, selfID string, priv ed25519.PrivateKey, seedMinInterval, replyMinGap time.Duration, replyDailyCap, replySampleMod int) *interactionRuntime {
+	base := strings.TrimSpace(stateDir)
+	if base == "" {
+		base = ".aiwre"
+	}
+	if seedMinInterval < 0 {
+		seedMinInterval = 0
+	}
+	if replyMinGap < 0 {
+		replyMinGap = 0
+	}
+	if replyDailyCap < 0 {
+		replyDailyCap = 0
+	}
+	if replySampleMod < 1 {
+		replySampleMod = 1
+	}
+	if replySampleMod > 4096 {
+		replySampleMod = 4096
+	}
+	return &interactionRuntime{
+		relay:           strings.TrimSpace(relay),
+		stateDir:        base,
+		statePath:       filepath.Join(base, interactionStateFileName),
+		selfID:          strings.ToLower(strings.TrimSpace(selfID)),
+		priv:            priv,
+		seedMinInterval: seedMinInterval,
+		replyMinGap:     replyMinGap,
+		replyDailyCap:   replyDailyCap,
+		replySampleMod:  replySampleMod,
+		state:           loadInteractionState(filepath.Join(base, interactionStateFileName)),
+	}
+}
+
+func (r *interactionRuntime) maybeSeedDiscovery(client *transport.Client) (id string, seeded bool, err error) {
+	if r == nil || client == nil {
+		return "", false, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now().UTC()
+	r.rollDay(now)
+	if r.seedMinInterval > 0 && strings.TrimSpace(r.state.LastSeedAt) != "" {
+		if last, parseErr := time.Parse(time.RFC3339, r.state.LastSeedAt); parseErr == nil && now.Sub(last) < r.seedMinInterval {
+			return "", false, nil
+		}
+	}
+
+	msg := &protocol.Message{
+		Topic: "global.announce",
+		Type:  protocol.TypeQuery,
+		TTL:   300,
+		Metadata: map[string]any{
+			"client":           "aiwre-cli",
+			"client_v":         "1.0",
+			"interaction_pack": "v1",
+			"interaction_kind": "discover",
+			"from":             r.selfID,
+			"reply_sample_mod": r.replySampleMod,
+		},
+		Body: "discover ping: online agent seeking peers. reply with type=response.\n",
+	}
+	pubID, pubErr := publishSignedMessage(client, r.priv, msg)
+	if pubErr != nil {
+		return "", false, pubErr
+	}
+
+	r.state.LastSeedAt = now.Format(time.RFC3339)
+	if saveErr := saveInteractionState(r.statePath, r.state); saveErr != nil {
+		return pubID, true, saveErr
+	}
+	_ = appendActivity(r.stateDir, activityEvent{
+		Time:      now.Format(time.RFC3339),
+		Action:    "publish",
+		Relay:     r.relay,
+		Topic:     msg.Topic,
+		MessageID: pubID,
+		Count:     1,
+		Detail:    "phase=interaction_seed type=query",
+	})
+	return pubID, true, nil
+}
+
+func (r *interactionRuntime) maybeAutoReplyFromPath(client *transport.Client, topic string, id string, path string) error {
+	if r == nil || client == nil {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	msg, err := protocol.ParseSignalMD(string(raw))
+	if err != nil || msg == nil {
+		return err
+	}
+	if strings.ToLower(strings.TrimSpace(msg.Sender)) == r.selfID {
+		return nil
+	}
+	if msg.Type != protocol.TypeQuery {
+		return nil
+	}
+	if strings.TrimSpace(msg.ID) == "" {
+		return nil
+	}
+	if strings.TrimSpace(msg.Topic) == "" || strings.TrimSpace(msg.Topic) != strings.TrimSpace(topic) {
+		return nil
+	}
+	kind := interactionMetaString(msg.Metadata, "interaction_kind")
+	if kind != "discover" {
+		return nil
+	}
+	toID := strings.ToLower(strings.TrimSpace(interactionMetaString(msg.Metadata, "to")))
+	if toID != "" && toID != r.selfID {
+		return nil
+	}
+
+	// Never allow inbound metadata to make us reply more aggressively.
+	// Peers may only request sparser replies (higher mod), not denser ones.
+	sampleMod := r.replySampleMod
+	inboundSampleMod := interactionMetaInt(msg.Metadata, "reply_sample_mod", sampleMod)
+	if inboundSampleMod > sampleMod {
+		sampleMod = inboundSampleMod
+	}
+	if sampleMod < 1 {
+		sampleMod = 1
+	}
+	if sampleMod > 4096 {
+		sampleMod = 4096
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	now := time.Now().UTC()
+	r.rollDay(now)
+	r.pruneReplied(now)
+	if _, ok := r.state.Replied[msg.ID]; ok {
+		return nil
+	}
+	if r.replyDailyCap > 0 && r.state.RepliesToday >= r.replyDailyCap {
+		return nil
+	}
+	if r.replyMinGap > 0 && strings.TrimSpace(r.state.LastReplyAt) != "" {
+		if last, parseErr := time.Parse(time.RFC3339, r.state.LastReplyAt); parseErr == nil && now.Sub(last) < r.replyMinGap {
+			return nil
+		}
+	}
+	if !interactionSelectedForReply(r.selfID, msg.ID, sampleMod) {
+		return nil
+	}
+
+	reply := &protocol.Message{
+		Topic: msg.Topic,
+		Type:  protocol.TypeResponse,
+		TTL:   300,
+		Metadata: map[string]any{
+			"client":           "aiwre-cli",
+			"client_v":         "1.0",
+			"interaction_pack": "v1",
+			"interaction_kind": "discover_ack",
+			"reply_to":         msg.ID,
+			"to":               msg.Sender,
+		},
+		Body: fmt.Sprintf("discover ack from %s\n", shortFingerprint(r.selfID)),
+	}
+	replyID, pubErr := publishSignedMessage(client, r.priv, reply)
+	if pubErr != nil {
+		return pubErr
+	}
+
+	if r.state.Replied == nil {
+		r.state.Replied = map[string]string{}
+	}
+	r.state.Replied[msg.ID] = now.Format(time.RFC3339)
+	r.state.RepliesToday++
+	r.state.LastReplyAt = now.Format(time.RFC3339)
+	if saveErr := saveInteractionState(r.statePath, r.state); saveErr != nil {
+		return saveErr
+	}
+	_ = appendActivity(r.stateDir, activityEvent{
+		Time:      now.Format(time.RFC3339),
+		Action:    "publish",
+		Relay:     r.relay,
+		Topic:     reply.Topic,
+		MessageID: replyID,
+		Count:     1,
+		Detail:    fmt.Sprintf("phase=interaction_reply reply_to=%s", msg.ID),
+	})
+	fmt.Println("interaction_reply:", replyID, "to:", shortFingerprint(msg.Sender), "reply_to:", msg.ID)
+	return nil
+}
+
+func (r *interactionRuntime) rollDay(now time.Time) {
+	if r == nil || r.state == nil {
+		return
+	}
+	day := now.Format("2006-01-02")
+	if strings.TrimSpace(r.state.Day) == day {
+		return
+	}
+	r.state.Day = day
+	r.state.RepliesToday = 0
+}
+
+func (r *interactionRuntime) pruneReplied(now time.Time) {
+	if r == nil || r.state == nil || len(r.state.Replied) == 0 {
+		return
+	}
+	cutoff := now.Add(-48 * time.Hour)
+	for id, ts := range r.state.Replied {
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(ts))
+		if err != nil || t.Before(cutoff) {
+			delete(r.state.Replied, id)
+		}
+	}
+	if len(r.state.Replied) <= 4096 {
+		return
+	}
+	// Hard cap in case clocks/parse issues keep old entries around.
+	i := 0
+	for id := range r.state.Replied {
+		delete(r.state.Replied, id)
+		i++
+		if len(r.state.Replied) <= 2048 || i > 4096 {
+			break
+		}
+	}
+}
+
+func interactionMetaString(meta map[string]any, key string) string {
+	if meta == nil {
+		return ""
+	}
+	v, ok := meta[key]
+	if !ok || v == nil {
+		return ""
+	}
+	switch t := v.(type) {
+	case string:
+		return strings.TrimSpace(t)
+	case json.Number:
+		return strings.TrimSpace(t.String())
+	default:
+		return strings.TrimSpace(fmt.Sprint(t))
+	}
+}
+
+func interactionMetaInt(meta map[string]any, key string, fallback int) int {
+	if meta == nil {
+		return fallback
+	}
+	v, ok := meta[key]
+	if !ok || v == nil {
+		return fallback
+	}
+	switch t := v.(type) {
+	case int:
+		return t
+	case int64:
+		return int(t)
+	case float64:
+		return int(t)
+	case json.Number:
+		if n, err := t.Int64(); err == nil {
+			return int(n)
+		}
+		return fallback
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(t)); err == nil {
+			return n
+		}
+		return fallback
+	default:
+		return fallback
+	}
+}
+
+func interactionSelectedForReply(selfID, queryID string, mod int) bool {
+	if mod <= 1 {
+		return true
+	}
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(selfID)) + "|" + strings.ToLower(strings.TrimSpace(queryID))))
+	n := binary.BigEndian.Uint32(sum[:4])
+	return int(n%uint32(mod)) == 0
+}
+
+func publishSignedMessage(client *transport.Client, priv ed25519.PrivateKey, msg *protocol.Message) (string, error) {
+	if client == nil {
+		return "", errors.New("relay client is nil")
+	}
+	if msg == nil {
+		return "", errors.New("message is nil")
+	}
+	if err := protocol.SignMessage(msg, priv); err != nil {
+		return "", err
+	}
+	raw, err := protocol.RenderSignalMD(msg)
+	if err != nil {
+		return "", err
+	}
+	policy := security.NewAdmissionPolicy()
+	if err := policy.Verify(msg); err != nil {
+		return "", fmt.Errorf("local verify failed: %w", err)
+	}
+	resp, err := client.PublishFast(raw)
+	if err != nil {
+		return "", err
+	}
+	return resp.ID, nil
+}
+
+func shortFingerprint(v string) string {
+	s := strings.ToLower(strings.TrimSpace(v))
+	if len(s) <= 12 {
+		return s
+	}
+	return s[:12]
+}
+
+func loadInteractionState(path string) *interactionState {
+	out := &interactionState{
+		Version: 1,
+		Day:     time.Now().UTC().Format("2006-01-02"),
+		Replied: map[string]string{},
+	}
+	if strings.TrimSpace(path) == "" {
+		return out
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var parsed interactionState
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return out
+	}
+	if parsed.Version == 0 {
+		parsed.Version = 1
+	}
+	if parsed.Day == "" {
+		parsed.Day = out.Day
+	}
+	if parsed.Replied == nil {
+		parsed.Replied = map[string]string{}
+	}
+	return &parsed
+}
+
+func saveInteractionState(path string, state *interactionState) error {
+	if strings.TrimSpace(path) == "" || state == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func dmTopic(a, b string) string {
