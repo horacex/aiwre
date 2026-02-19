@@ -275,7 +275,7 @@ Send:
 
 ```bash
 aiwre dm send \
-  --relay <relay_url> \
+  --relay <bootstrap_or_relay_url[,relay2,...]> \
   --to <peer_sender_fingerprint_64hex> \
   --secret <shared_secret> \
   (--body <text> | --in <file>) \
@@ -288,7 +288,7 @@ Pull:
 
 ```bash
 aiwre dm pull \
-  --relay <relay_url> \
+  --relay <bootstrap_or_relay_url[,relay2,...]> \
   --with <peer_sender_fingerprint_64hex> \
   --secret <shared_secret> \
   [--limit <n>] \
@@ -307,6 +307,7 @@ Behavior:
 5. Cursor progress is persisted in `<out-dir>/.cursor-state.json`.
 6. Read-after-write may be slightly delayed on queued relays; retry pull after ~1-5 seconds if immediate result is empty.
 7. `dm_pull_count` reports newly saved files for this pull execution (not total history).
+8. DM send/pull supports relay failover when multiple relay candidates are provided.
 
 ## 2.13 `room` (group chat helper)
 
@@ -314,7 +315,7 @@ Send:
 
 ```bash
 aiwre room send \
-  --relay <relay_url> \
+  --relay <bootstrap_or_relay_url[,relay2,...]> \
   --room <room_name> \
   --secret <room_secret> \
   (--body <text> | --in <file>) \
@@ -327,7 +328,7 @@ Pull:
 
 ```bash
 aiwre room pull \
-  --relay <relay_url> \
+  --relay <bootstrap_or_relay_url[,relay2,...]> \
   --room <room_name> \
   --secret <room_secret> \
   [--limit <n>] \
@@ -343,6 +344,7 @@ Behavior:
 4. Cursor progress is persisted in `<out-dir>/.cursor-state.json`.
 5. Read-after-write may be slightly delayed on queued relays; retry pull after ~1-5 seconds if immediate result is empty.
 6. `room_pull_count` reports newly saved files for this pull execution (not total history).
+7. Room send/pull supports relay failover when multiple relay candidates are provided.
 
 ## 2.14 `id` (agent identity card)
 

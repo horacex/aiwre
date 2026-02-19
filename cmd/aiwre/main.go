@@ -1232,13 +1232,14 @@ func runDMSend(args []string) error {
 	if err := policy.Verify(msg); err != nil {
 		return fmt.Errorf("local verify failed: %w", err)
 	}
-	resolvedRelay, _, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
-	resp, err := client.PublishFast(raw)
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
+	resp, usedRelay, err := publishFastWithFailover(relayCandidates, raw)
 	if err != nil {
 		return err
 	}
 	fmt.Println("dm_sent: true")
+	fmt.Println("relay:", usedRelay)
 	fmt.Println("topic:", topic)
 	fmt.Println("to:", peerID)
 	fmt.Println("id:", resp.ID)
@@ -1275,12 +1276,13 @@ func runDMPull(args []string) error {
 	}
 	selfID := protocol.Fingerprint(priv.Public().(ed25519.PublicKey))
 	topic := dmTopic(selfID, peerID)
-	resolvedRelay, _, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
-	count, err := pullAndDecryptChat(client, topic, *secret, *limit, *outDir, !*skipVerify, "dm")
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
+	count, usedRelay, err := pullAndDecryptChatWithFailover(relayCandidates, topic, *secret, *limit, *outDir, !*skipVerify, "dm")
 	if err != nil {
 		return err
 	}
+	fmt.Println("relay:", usedRelay)
 	fmt.Println("dm_pull_topic:", topic)
 	fmt.Println("dm_new_saved_count:", count)
 	// Backward-compatible alias; kept for older parsers.
@@ -1350,13 +1352,14 @@ func runRoomSend(args []string) error {
 	if err := policy.Verify(msg); err != nil {
 		return fmt.Errorf("local verify failed: %w", err)
 	}
-	resolvedRelay, _, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
-	resp, err := client.PublishFast(raw)
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
+	resp, usedRelay, err := publishFastWithFailover(relayCandidates, raw)
 	if err != nil {
 		return err
 	}
 	fmt.Println("room_sent: true")
+	fmt.Println("relay:", usedRelay)
 	fmt.Println("topic:", topic)
 	fmt.Println("id:", resp.ID)
 	return nil
@@ -1386,12 +1389,13 @@ func runRoomPull(args []string) error {
 		return fmt.Errorf("--room: %w", err)
 	}
 	topic := "room." + roomID
-	resolvedRelay, _, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
-	count, err := pullAndDecryptChat(client, topic, *secret, *limit, *outDir, !*skipVerify, "room")
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
+	count, usedRelay, err := pullAndDecryptChatWithFailover(relayCandidates, topic, *secret, *limit, *outDir, !*skipVerify, "room")
 	if err != nil {
 		return err
 	}
+	fmt.Println("relay:", usedRelay)
 	fmt.Println("room_pull_topic:", topic)
 	fmt.Println("room_new_saved_count:", count)
 	// Backward-compatible alias; kept for older parsers.
@@ -4560,6 +4564,25 @@ func pullAndDecryptChat(client *transport.Client, topic, secret string, limit in
 		saved++
 	}
 	return saved, nil
+}
+
+func pullAndDecryptChatWithFailover(relays []string, topic, secret string, limit int, outDir string, verifyAdmission bool, chatMode string) (int, string, error) {
+	if len(relays) == 0 {
+		return 0, "", errors.New("no relay candidates")
+	}
+	var lastErr error
+	for _, relay := range relays {
+		client := transport.NewClient(relay)
+		count, err := pullAndDecryptChat(client, topic, secret, limit, outDir, verifyAdmission, chatMode)
+		if err == nil {
+			return count, relay, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("chat pull failed on all relays")
+	}
+	return 0, "", lastErr
 }
 
 func isRateLimitError(err error) bool {

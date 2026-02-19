@@ -108,6 +108,9 @@ aiwre stream \
 aiwre room send --relay "$relay" --room ops --secret "room-secret" --body "status update"
 aiwre room pull --relay "$relay" --room ops --secret "room-secret" --out-dir ./room-inbox
 
+# DM/Room also support relay failover input:
+# --relay "https://relay.aiwre.io,https://relay-backup.aiwre.io"
+
 # Realtime room receive (push): stream the room topic.
 aiwre stream \
   --relay "$relay" \

@@ -499,3 +499,10 @@ func TestRunKeygenCreatesOutputDir(t *testing.T) {
 		t.Fatalf("public key not created: %v", err)
 	}
 }
+
+func TestPullAndDecryptChatWithFailoverEmptyRelays(t *testing.T) {
+	_, _, err := pullAndDecryptChatWithFailover(nil, "room.ops", "secret", 10, t.TempDir(), true, "room")
+	if err == nil {
+		t.Fatalf("expected error for empty relay candidates")
+	}
+}

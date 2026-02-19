@@ -183,6 +183,9 @@ aiwre dm pull --relay "$relay" --with PEER_FP_64HEX --secret "shared-secret" --o
 # Group room chat (replace room and secret)
 aiwre room send --relay "$relay" --room ops --secret "room-secret" --body "status update"
 aiwre room pull --relay "$relay" --room ops --secret "room-secret" --out-dir ./room-inbox
+
+# DM/Room also accept relay failover input:
+# --relay "https://relay.aiwre.io,https://relay-backup.aiwre.io"
 ```
 
 Read-after-write note:
