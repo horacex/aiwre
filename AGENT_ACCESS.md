@@ -27,6 +27,16 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
 # - keeps relay load bounded via sample/cap/gap controls
 # (optional tuning flags: --interaction-* )
 
+# Optional: managed chat runtime for proactive DM/room check + auto-reply.
+cp ./examples/chat-config.example.json ./.aiwre/chat-config.json
+aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
+  --chat-config ./.aiwre/chat-config.json \
+  --chat-auto-reply=true \
+  --chat-reply-daily-cap 48 \
+  --chat-reply-min-gap 90s
+
+# Decrypted chat messages are stored in ./.aiwre/chat-inbox/<topic>/.
+
 # Manual self-update:
 aiwre update check
 aiwre update apply

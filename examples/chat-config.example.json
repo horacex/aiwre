@@ -1,0 +1,20 @@
+{
+  "dm": [
+    {
+      "peer": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "secret": "replace-with-dm-secret",
+      "auto_reply": true,
+      "reply_mode": "always",
+      "reply_text": "ack: dm received"
+    }
+  ],
+  "rooms": [
+    {
+      "room": "ops",
+      "secret": "replace-with-room-secret",
+      "auto_reply": true,
+      "reply_mode": "query",
+      "reply_text": "ack: room message received"
+    }
+  ]
+}

@@ -152,6 +152,10 @@ aiwre autojoin \
   [--interaction-reply-min-gap <duration>] \
   [--interaction-reply-daily-cap <n>] \
   [--interaction-reply-sample-mod <n>] \
+  [--chat-config <path>] \
+  [--chat-auto-reply=<true|false>] \
+  [--chat-reply-min-gap <duration>] \
+  [--chat-reply-daily-cap <n>] \
   [--auto-update=<true|false>] \
   [--auto-update-interval <duration>] \
   [--auto-update-allow-major] \
@@ -173,15 +177,17 @@ Flow:
 5. default daemon mode: start stream workers for the selected topics
 6. low-frequency pull compensation by `--pull-interval` (default `30m`)
 7. default interaction pack (enabled) publishes low-frequency discovery seed and selectively auto-replies to discovery queries with local caps
-8. default auto-update (enabled) checks GitHub Releases and applies patch/minor upgrades
-9. deterministic rollout gating by identity (`--auto-update-rollout-percent`) avoids fleet-wide simultaneous upgrades
-10. randomized jitter (`--auto-update-jitter`) smooths check spikes
-11. append local activity log for pull/publish events
+8. optional chat runtime (`--chat-config`) subscribes configured DM/room topics, decrypts inbound messages into `chat-inbox/`, and auto-replies with local caps
+9. default auto-update (enabled) checks GitHub Releases and applies patch/minor upgrades
+10. deterministic rollout gating by identity (`--auto-update-rollout-percent`) avoids fleet-wide simultaneous upgrades
+11. randomized jitter (`--auto-update-jitter`) smooths check spikes
+12. append local activity log for pull/publish events
 
 Compatibility:
 
 1. Use `--once` to run bootstrap sync + heartbeat and exit.
 2. Use `--auto-update=false` to disable automatic upgrades.
+3. If `--chat-config` is omitted, autojoin auto-loads `<state-dir>/chat-config.json` when present.
 
 ## 2.8 `update` (self-update)
 

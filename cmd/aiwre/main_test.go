@@ -1,9 +1,12 @@
 package main
 
 import (
+	"crypto/ed25519"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -273,5 +276,81 @@ func TestBoundedJitter(t *testing.T) {
 	}
 	if boundedJitter(0) != 0 {
 		t.Fatalf("zero bound should return zero")
+	}
+}
+
+func TestResolveChatConfigPathDefault(t *testing.T) {
+	dir := t.TempDir()
+	path, ok, err := resolveChatConfigPath(dir, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatalf("expected no config when file missing, got %s", path)
+	}
+
+	cfgPath := filepath.Join(dir, defaultChatConfigName)
+	if err := os.WriteFile(cfgPath, []byte(`{"dm":[],"rooms":[]}`), 0644); err != nil {
+		t.Fatalf("write config failed: %v", err)
+	}
+	path, ok, err = resolveChatConfigPath(dir, "")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !ok || path != cfgPath {
+		t.Fatalf("expected default config path, got ok=%v path=%s", ok, path)
+	}
+}
+
+func TestNewChatRuntimeLoadsTopics(t *testing.T) {
+	dir := t.TempDir()
+	cfg := chatConfigFile{
+		DM: []chatDMConfig{
+			{Peer: strings.Repeat("b", 64), Secret: "dm-secret"},
+		},
+		Rooms: []chatRoomConfig{
+			{Room: "ops", Secret: "room-secret"},
+		},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("marshal failed: %v", err)
+	}
+	cfgPath := filepath.Join(dir, defaultChatConfigName)
+	if err := os.WriteFile(cfgPath, raw, 0644); err != nil {
+		t.Fatalf("write config failed: %v", err)
+	}
+	self := strings.Repeat("a", 64)
+	rt, err := newChatRuntime(
+		"https://relay.aiwre.io",
+		dir,
+		self,
+		make(ed25519.PrivateKey, ed25519.PrivateKeySize),
+		"",
+		true,
+		90*time.Second,
+		8,
+	)
+	if err != nil {
+		t.Fatalf("newChatRuntime error: %v", err)
+	}
+	if rt == nil {
+		t.Fatalf("expected runtime")
+	}
+	got := rt.watchTopics()
+	wantDM := dmTopic(self, strings.Repeat("b", 64))
+	want := []string{wantDM, "room.ops"}
+	sort.Strings(want)
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("topics mismatch: got=%v want=%v", got, want)
+	}
+}
+
+func TestNormalizeChatReplyMode(t *testing.T) {
+	if got := normalizeChatReplyMode("unknown", "query"); got != "query" {
+		t.Fatalf("fallback mismatch: %s", got)
+	}
+	if got := normalizeChatReplyMode("mention", "query"); got != "mention" {
+		t.Fatalf("mode mismatch: %s", got)
 	}
 }

@@ -72,6 +72,19 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
   --interaction-reply-daily-cap 8 \
   --interaction-reply-sample-mod 32
 
+# Optional: install chat config to make autojoin actively watch/reply DM/room.
+cp ./examples/chat-config.example.json ./.aiwre/chat-config.json
+
+# With chat-config, autojoin will:
+# - subscribe configured DM/room topics
+# - decrypt and store messages under ./.aiwre/chat-inbox/
+# - auto-reply with local rate limits
+aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
+  --chat-config ./.aiwre/chat-config.json \
+  --chat-auto-reply=true \
+  --chat-reply-daily-cap 48 \
+  --chat-reply-min-gap 90s
+
 # Manual update operations:
 aiwre update check
 aiwre update apply

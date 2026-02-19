@@ -1319,6 +1319,8 @@ type streamEvent struct {
 const (
 	cursorStateFileName      = ".cursor-state.json"
 	interactionStateFileName = ".interaction-state.json"
+	chatStateFileName        = ".chat-state.json"
+	defaultChatConfigName    = "chat-config.json"
 	updateStateFileName      = ".update-state.json"
 	updateLockFileName       = ".update.lock"
 	incrementalFeedMinLimit  = 50
@@ -1358,6 +1360,10 @@ func runAutojoin(args []string) error {
 	interactionReplyMinGap := fs.Duration("interaction-reply-min-gap", 90*time.Second, "Minimum gap between auto replies from this agent")
 	interactionReplyDailyCap := fs.Int("interaction-reply-daily-cap", 8, "Max number of auto replies per UTC day")
 	interactionReplySampleMod := fs.Int("interaction-reply-sample-mod", 32, "Selective reply sampling modulus (higher = fewer auto replies)")
+	chatConfigPath := fs.String("chat-config", "", "Optional JSON chat config (default <state-dir>/chat-config.json if present)")
+	chatAutoReply := fs.Bool("chat-auto-reply", true, "Enable automatic DM/room reply behavior for configured chat topics")
+	chatReplyMinGap := fs.Duration("chat-reply-min-gap", 90*time.Second, "Minimum gap between automatic chat replies")
+	chatReplyDailyCap := fs.Int("chat-reply-daily-cap", 48, "Max automatic chat replies per UTC day")
 	autoUpdate := fs.Bool("auto-update", true, "Enable automatic CLI self-update checks in daemon mode")
 	autoUpdateInterval := fs.Duration("auto-update-interval", 24*time.Hour, "Interval for automatic update checks")
 	autoUpdateAllowMajor := fs.Bool("auto-update-allow-major", false, "Allow automatic major version upgrades")
@@ -1396,11 +1402,32 @@ func runAutojoin(args []string) error {
 			return err
 		}
 	}
+	selfID := protocol.Fingerprint(pub)
 
 	topics := profile.DefaultTopics
+	chatRuntime, err := newChatRuntime(
+		relay,
+		*stateDir,
+		selfID,
+		priv,
+		*chatConfigPath,
+		*chatAutoReply,
+		*chatReplyMinGap,
+		*chatReplyDailyCap,
+	)
+	if err != nil {
+		return err
+	}
+	if chatRuntime != nil {
+		topics = append(topics, chatRuntime.watchTopics()...)
+	}
 	if strings.TrimSpace(*topicsCSV) != "" {
 		topics = parseTopicsCSV(*topicsCSV)
+		if chatRuntime != nil {
+			topics = append(topics, chatRuntime.watchTopics()...)
+		}
 	}
+	topics = uniqStrings(topics)
 	if len(topics) == 0 {
 		topics = []string{"global.announce"}
 	}
@@ -1478,19 +1505,24 @@ func runAutojoin(args []string) error {
 	fmt.Println("autojoin: true")
 	fmt.Println("relay:", relay)
 	fmt.Println("join_mode:", profile.Join)
-	fmt.Println("identity:", protocol.Fingerprint(pub))
+	fmt.Println("identity:", selfID)
 	fmt.Println("topics:", strings.Join(topics, ","))
 	fmt.Println("downloaded:", totalDownloaded)
 	fmt.Println("heartbeat_id:", pubResp.ID)
 	fmt.Println("state_dir:", *stateDir)
 	fmt.Println("auto_update:", *autoUpdate)
+	if chatRuntime != nil {
+		fmt.Println("chat_config:", chatRuntime.configPath)
+		fmt.Println("chat_topics:", strings.Join(chatRuntime.watchTopics(), ","))
+		fmt.Println("chat_auto_reply:", *chatAutoReply)
+	}
 
 	var interaction *interactionRuntime
 	if *interactionPack {
 		interaction = newInteractionRuntime(
 			relay,
 			*stateDir,
-			protocol.Fingerprint(pub),
+			selfID,
 			priv,
 			*interactionSeedMinInterval,
 			*interactionReplyMinGap,
@@ -1544,9 +1576,18 @@ func runAutojoin(args []string) error {
 					_ = os.MkdirAll(out, 0755)
 				}
 				var onSaved func(topic, id, path string)
-				if interaction != nil {
+				if interaction != nil || chatRuntime != nil {
 					onSaved = func(sigTopic, id, path string) {
-						_ = interaction.maybeAutoReplyFromPath(client, sigTopic, id, path)
+						if interaction != nil {
+							if err := interaction.maybeAutoReplyFromPath(client, sigTopic, id, path); err != nil {
+								fmt.Fprintln(os.Stderr, "warn: interaction reply hook failed:", err)
+							}
+						}
+						if chatRuntime != nil {
+							if err := chatRuntime.handleSaved(client, sigTopic, id, path); err != nil {
+								fmt.Fprintln(os.Stderr, "warn: chat runtime hook failed:", err)
+							}
+						}
 					}
 				}
 				runAutojoinStreamWorker(ctx, client, relay, t, out, base, max, strings.TrimSpace(*handler), onSaved, func(received, saved, errs int) {
@@ -1574,7 +1615,7 @@ func runAutojoin(args []string) error {
 	}
 
 	if *autoUpdate {
-		applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), protocol.Fingerprint(pub), *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, false)
+		applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), selfID, *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "warn: auto-update check failed:", err)
 		}
@@ -1639,7 +1680,7 @@ func runAutojoin(args []string) error {
 				})
 			}
 		case <-updateC:
-			applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), protocol.Fingerprint(pub), *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, true)
+			applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), selfID, *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, true)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "warn: auto-update tick failed:", err)
 				continue
@@ -2810,6 +2851,562 @@ func runSignalHandler(parent context.Context, handler string, relay string, topi
 		}
 		fmt.Fprintln(os.Stderr, "warn: handler failed:", err)
 	}
+}
+
+type chatConfigFile struct {
+	DM    []chatDMConfig   `json:"dm"`
+	Rooms []chatRoomConfig `json:"rooms"`
+}
+
+type chatDMConfig struct {
+	Peer      string `json:"peer"`
+	Secret    string `json:"secret"`
+	AutoReply *bool  `json:"auto_reply,omitempty"`
+	ReplyMode string `json:"reply_mode,omitempty"`
+	ReplyText string `json:"reply_text,omitempty"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+}
+
+type chatRoomConfig struct {
+	Room      string `json:"room"`
+	Secret    string `json:"secret"`
+	AutoReply *bool  `json:"auto_reply,omitempty"`
+	ReplyMode string `json:"reply_mode,omitempty"`
+	ReplyText string `json:"reply_text,omitempty"`
+	Enabled   *bool  `json:"enabled,omitempty"`
+}
+
+type chatSubscription struct {
+	Kind      string
+	Topic     string
+	Secret    string
+	Peer      string
+	Room      string
+	AutoReply bool
+	ReplyMode string
+	ReplyText string
+}
+
+type chatRuntime struct {
+	mu            sync.Mutex
+	relay         string
+	stateDir      string
+	configPath    string
+	inboxDir      string
+	statePath     string
+	selfID        string
+	priv          ed25519.PrivateKey
+	autoReply     bool
+	replyMinGap   time.Duration
+	replyDailyCap int
+	subByTopic    map[string]chatSubscription
+	topics        []string
+	state         *chatRuntimeState
+}
+
+type chatRuntimeState struct {
+	Version      int               `json:"version"`
+	UpdatedAt    string            `json:"updated_at"`
+	Day          string            `json:"day"`
+	RepliesToday int               `json:"replies_today"`
+	LastReplyAt  string            `json:"last_reply_at,omitempty"`
+	Handled      map[string]string `json:"handled,omitempty"`
+	Replied      map[string]string `json:"replied,omitempty"`
+}
+
+func newChatRuntime(relay, stateDir, selfID string, priv ed25519.PrivateKey, configPath string, autoReply bool, replyMinGap time.Duration, replyDailyCap int) (*chatRuntime, error) {
+	base := strings.TrimSpace(stateDir)
+	if base == "" {
+		base = ".aiwre"
+	}
+	cfgPath, ok, err := resolveChatConfigPath(base, configPath)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, nil
+	}
+	cfg, err := loadChatConfigFile(cfgPath)
+	if err != nil {
+		return nil, err
+	}
+	self := strings.ToLower(strings.TrimSpace(selfID))
+	if self == "" {
+		return nil, errors.New("self id is required for chat runtime")
+	}
+	if replyMinGap < 0 {
+		replyMinGap = 0
+	}
+	if replyDailyCap < 0 {
+		replyDailyCap = 0
+	}
+
+	subByTopic := map[string]chatSubscription{}
+	topics := make([]string, 0, len(cfg.DM)+len(cfg.Rooms))
+	for _, entry := range cfg.DM {
+		if !boolWithDefault(entry.Enabled, true) {
+			continue
+		}
+		peer, err := normalizeSenderID(entry.Peer)
+		if err != nil {
+			return nil, fmt.Errorf("chat config dm.peer: %w", err)
+		}
+		secret := strings.TrimSpace(entry.Secret)
+		if secret == "" {
+			return nil, fmt.Errorf("chat config dm.peer=%s: secret is required", peer)
+		}
+		topic := dmTopic(self, peer)
+		mode := normalizeChatReplyMode(entry.ReplyMode, "always")
+		subByTopic[topic] = chatSubscription{
+			Kind:      "dm",
+			Topic:     topic,
+			Secret:    secret,
+			Peer:      peer,
+			AutoReply: boolWithDefault(entry.AutoReply, true),
+			ReplyMode: mode,
+			ReplyText: strings.TrimSpace(entry.ReplyText),
+		}
+		topics = append(topics, topic)
+	}
+	for _, entry := range cfg.Rooms {
+		if !boolWithDefault(entry.Enabled, true) {
+			continue
+		}
+		room, err := normalizeTopicSegment(entry.Room)
+		if err != nil {
+			return nil, fmt.Errorf("chat config room: %w", err)
+		}
+		secret := strings.TrimSpace(entry.Secret)
+		if secret == "" {
+			return nil, fmt.Errorf("chat config room=%s: secret is required", room)
+		}
+		topic := "room." + room
+		mode := normalizeChatReplyMode(entry.ReplyMode, "query")
+		subByTopic[topic] = chatSubscription{
+			Kind:      "room",
+			Topic:     topic,
+			Secret:    secret,
+			Room:      room,
+			AutoReply: boolWithDefault(entry.AutoReply, true),
+			ReplyMode: mode,
+			ReplyText: strings.TrimSpace(entry.ReplyText),
+		}
+		topics = append(topics, topic)
+	}
+	topics = uniqStrings(topics)
+	if len(topics) == 0 {
+		return nil, nil
+	}
+
+	return &chatRuntime{
+		relay:         strings.TrimSpace(relay),
+		stateDir:      base,
+		configPath:    cfgPath,
+		inboxDir:      filepath.Join(base, "chat-inbox"),
+		statePath:     filepath.Join(base, chatStateFileName),
+		selfID:        self,
+		priv:          priv,
+		autoReply:     autoReply,
+		replyMinGap:   replyMinGap,
+		replyDailyCap: replyDailyCap,
+		subByTopic:    subByTopic,
+		topics:        topics,
+		state:         loadChatRuntimeState(filepath.Join(base, chatStateFileName)),
+	}, nil
+}
+
+func (r *chatRuntime) watchTopics() []string {
+	if r == nil {
+		return nil
+	}
+	out := make([]string, 0, len(r.topics))
+	out = append(out, r.topics...)
+	sort.Strings(out)
+	return out
+}
+
+func (r *chatRuntime) handleSaved(client *transport.Client, topic string, id string, path string) error {
+	if r == nil || client == nil {
+		return nil
+	}
+	sub, ok := r.subByTopic[strings.TrimSpace(topic)]
+	if !ok {
+		return nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	msg, err := protocol.ParseSignalMD(string(raw))
+	if err != nil || msg == nil {
+		return err
+	}
+	if strings.TrimSpace(msg.ID) == "" {
+		return nil
+	}
+	if strings.ToLower(strings.TrimSpace(msg.Sender)) == r.selfID {
+		return nil
+	}
+	if strings.TrimSpace(msg.Topic) != sub.Topic {
+		return nil
+	}
+
+	r.mu.Lock()
+	now := time.Now().UTC()
+	r.rollDay(now)
+	r.pruneState(now)
+	if _, seen := r.state.Handled[msg.ID]; seen {
+		r.mu.Unlock()
+		return nil
+	}
+	r.mu.Unlock()
+
+	if interactionMetaString(msg.Metadata, "chat") != sub.Kind {
+		return nil
+	}
+	if interactionMetaString(msg.Metadata, "enc") != "aes-256-gcm" {
+		return nil
+	}
+	nonce := interactionMetaString(msg.Metadata, "enc_nonce")
+	if nonce == "" {
+		return nil
+	}
+	plain, err := decryptChatBody(sub.Secret, sub.Topic, msg.Body, nonce)
+	if err != nil {
+		return nil
+	}
+	if err := r.writeDecrypted(sub, msg, plain); err != nil {
+		return err
+	}
+
+	shouldReply := false
+	reserveReply := false
+	now = time.Now().UTC()
+	r.mu.Lock()
+	r.rollDay(now)
+	r.pruneState(now)
+	r.state.Handled[msg.ID] = now.Format(time.RFC3339)
+	if r.autoReply && sub.AutoReply && !isChatAutoReplyMessage(msg.Metadata) && r.shouldAutoReply(sub, msg, plain) {
+		if _, exists := r.state.Replied[msg.ID]; !exists {
+			if r.replyDailyCap <= 0 || r.state.RepliesToday < r.replyDailyCap {
+				if r.replyMinGap <= 0 || r.lastReplyGapEnough(now) {
+					shouldReply = true
+					reserveReply = true
+					r.state.Replied[msg.ID] = "pending"
+					r.state.RepliesToday++
+					r.state.LastReplyAt = now.Format(time.RFC3339)
+				}
+			}
+		}
+	}
+	if err := saveChatRuntimeState(r.statePath, r.state); err != nil {
+		r.mu.Unlock()
+		return err
+	}
+	r.mu.Unlock()
+
+	if !shouldReply {
+		return nil
+	}
+	replyID, err := r.publishAutoReply(client, sub, msg)
+	if err != nil {
+		if reserveReply {
+			r.mu.Lock()
+			delete(r.state.Replied, msg.ID)
+			if r.state.RepliesToday > 0 {
+				r.state.RepliesToday--
+			}
+			_ = saveChatRuntimeState(r.statePath, r.state)
+			r.mu.Unlock()
+		}
+		return err
+	}
+	now = time.Now().UTC()
+	r.mu.Lock()
+	r.state.Replied[msg.ID] = now.Format(time.RFC3339)
+	_ = saveChatRuntimeState(r.statePath, r.state)
+	r.mu.Unlock()
+	_ = appendActivity(r.stateDir, activityEvent{
+		Time:      now.Format(time.RFC3339),
+		Action:    "publish",
+		Relay:     r.relay,
+		Topic:     sub.Topic,
+		MessageID: replyID,
+		Count:     1,
+		Detail:    fmt.Sprintf("phase=chat_auto_reply kind=%s reply_to=%s", sub.Kind, msg.ID),
+	})
+	fmt.Println("chat_auto_reply:", replyID, "topic:", sub.Topic, "reply_to:", msg.ID)
+	return nil
+}
+
+func (r *chatRuntime) lastReplyGapEnough(now time.Time) bool {
+	if r == nil || r.state == nil {
+		return true
+	}
+	if r.replyMinGap <= 0 || strings.TrimSpace(r.state.LastReplyAt) == "" {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339, r.state.LastReplyAt)
+	if err != nil {
+		return true
+	}
+	return now.Sub(last) >= r.replyMinGap
+}
+
+func (r *chatRuntime) shouldAutoReply(sub chatSubscription, msg *protocol.Message, plain string) bool {
+	if r == nil || msg == nil {
+		return false
+	}
+	mode := normalizeChatReplyMode(sub.ReplyMode, "always")
+	switch mode {
+	case "never":
+		return false
+	case "query":
+		return msg.Type == protocol.TypeQuery
+	case "mention":
+		to := strings.ToLower(strings.TrimSpace(interactionMetaString(msg.Metadata, "to")))
+		if to != "" && to == r.selfID {
+			return true
+		}
+		needle := "@" + shortFingerprint(r.selfID)
+		return strings.Contains(strings.ToLower(plain), strings.ToLower(needle))
+	default:
+		return true
+	}
+}
+
+func (r *chatRuntime) publishAutoReply(client *transport.Client, sub chatSubscription, incoming *protocol.Message) (string, error) {
+	if r == nil || client == nil {
+		return "", errors.New("chat runtime unavailable")
+	}
+	replyText := strings.TrimSpace(sub.ReplyText)
+	if replyText == "" {
+		if sub.Kind == "dm" {
+			replyText = fmt.Sprintf("ack: received %s from %s", shortFingerprint(incoming.ID), shortFingerprint(incoming.Sender))
+		} else {
+			replyText = fmt.Sprintf("ack: %s received in room %s", shortFingerprint(incoming.ID), sub.Room)
+		}
+	}
+	if !strings.HasSuffix(replyText, "\n") {
+		replyText += "\n"
+	}
+	cipherText, nonce, err := encryptChatBody(sub.Secret, sub.Topic, replyText)
+	if err != nil {
+		return "", err
+	}
+	meta := map[string]any{
+		"chat":            sub.Kind,
+		"chat_v":          "1",
+		"enc":             "aes-256-gcm",
+		"enc_nonce":       nonce,
+		"chat_auto_reply": true,
+		"reply_to":        incoming.ID,
+	}
+	if sub.Kind == "room" {
+		meta["room"] = sub.Room
+	}
+	if sub.Kind == "dm" {
+		meta["peer"] = sub.Peer
+		meta["to"] = incoming.Sender
+	}
+	reply := &protocol.Message{
+		Topic:    sub.Topic,
+		Type:     protocol.TypeResponse,
+		TTL:      protocol.DefaultTTL,
+		Metadata: meta,
+		Body:     cipherText,
+	}
+	return publishSignedMessage(client, r.priv, reply)
+}
+
+func (r *chatRuntime) writeDecrypted(sub chatSubscription, msg *protocol.Message, plain string) error {
+	if r == nil || msg == nil {
+		return nil
+	}
+	dir := filepath.Join(r.inboxDir, sanitizeTopicForPath(sub.Topic))
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	outPath := filepath.Join(dir, msg.ID+".txt")
+	if _, err := os.Stat(outPath); err == nil {
+		return nil
+	}
+	var b strings.Builder
+	b.WriteString("id: " + msg.ID + "\n")
+	b.WriteString("timestamp: " + msg.Timestamp + "\n")
+	b.WriteString("sender: " + msg.Sender + "\n")
+	b.WriteString("topic: " + msg.Topic + "\n")
+	b.WriteString("type: " + string(msg.Type) + "\n")
+	if sub.Kind == "dm" && sub.Peer != "" {
+		b.WriteString("peer: " + sub.Peer + "\n")
+	}
+	if sub.Kind == "room" && sub.Room != "" {
+		b.WriteString("room: " + sub.Room + "\n")
+	}
+	b.WriteString("---\n")
+	b.WriteString(plain)
+	if !strings.HasSuffix(plain, "\n") {
+		b.WriteString("\n")
+	}
+	return os.WriteFile(outPath, []byte(b.String()), 0644)
+}
+
+func (r *chatRuntime) rollDay(now time.Time) {
+	if r == nil || r.state == nil {
+		return
+	}
+	day := now.Format("2006-01-02")
+	if r.state.Day == day {
+		return
+	}
+	r.state.Day = day
+	r.state.RepliesToday = 0
+}
+
+func (r *chatRuntime) pruneState(now time.Time) {
+	if r == nil || r.state == nil {
+		return
+	}
+	cutoff := now.Add(-72 * time.Hour)
+	for id, ts := range r.state.Handled {
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(ts))
+		if err != nil || t.Before(cutoff) {
+			delete(r.state.Handled, id)
+		}
+	}
+	for id, ts := range r.state.Replied {
+		t, err := time.Parse(time.RFC3339, strings.TrimSpace(ts))
+		if err != nil || t.Before(cutoff) {
+			delete(r.state.Replied, id)
+		}
+	}
+	if len(r.state.Handled) > 8192 {
+		i := 0
+		for id := range r.state.Handled {
+			delete(r.state.Handled, id)
+			i++
+			if len(r.state.Handled) <= 4096 || i > 8192 {
+				break
+			}
+		}
+	}
+	if len(r.state.Replied) > 8192 {
+		i := 0
+		for id := range r.state.Replied {
+			delete(r.state.Replied, id)
+			i++
+			if len(r.state.Replied) <= 4096 || i > 8192 {
+				break
+			}
+		}
+	}
+}
+
+func resolveChatConfigPath(stateDir, raw string) (string, bool, error) {
+	if strings.TrimSpace(raw) != "" {
+		path := strings.TrimSpace(raw)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				return "", false, fmt.Errorf("chat config file not found: %s", path)
+			}
+			return "", false, err
+		}
+		return path, true, nil
+	}
+	path := filepath.Join(stateDir, defaultChatConfigName)
+	if _, err := os.Stat(path); err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, err
+	}
+	return path, true, nil
+}
+
+func loadChatConfigFile(path string) (*chatConfigFile, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var cfg chatConfigFile
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return nil, fmt.Errorf("invalid chat config json: %w", err)
+	}
+	return &cfg, nil
+}
+
+func boolWithDefault(v *bool, fallback bool) bool {
+	if v == nil {
+		return fallback
+	}
+	return *v
+}
+
+func normalizeChatReplyMode(v, fallback string) string {
+	mode := strings.ToLower(strings.TrimSpace(v))
+	if mode == "" {
+		mode = strings.ToLower(strings.TrimSpace(fallback))
+	}
+	switch mode {
+	case "always", "query", "mention", "never":
+		return mode
+	default:
+		return strings.ToLower(strings.TrimSpace(fallback))
+	}
+}
+
+func isChatAutoReplyMessage(meta map[string]any) bool {
+	raw := strings.ToLower(strings.TrimSpace(interactionMetaString(meta, "chat_auto_reply")))
+	return raw == "true" || raw == "1" || raw == "yes"
+}
+
+func loadChatRuntimeState(path string) *chatRuntimeState {
+	out := &chatRuntimeState{
+		Version: 1,
+		Day:     time.Now().UTC().Format("2006-01-02"),
+		Handled: map[string]string{},
+		Replied: map[string]string{},
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return out
+	}
+	var parsed chatRuntimeState
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return out
+	}
+	if parsed.Version == 0 {
+		parsed.Version = 1
+	}
+	if parsed.Day == "" {
+		parsed.Day = out.Day
+	}
+	if parsed.Handled == nil {
+		parsed.Handled = map[string]string{}
+	}
+	if parsed.Replied == nil {
+		parsed.Replied = map[string]string{}
+	}
+	return &parsed
+}
+
+func saveChatRuntimeState(path string, state *chatRuntimeState) error {
+	if strings.TrimSpace(path) == "" || state == nil {
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	state.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
+	raw, err := json.MarshalIndent(state, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0644); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 type interactionRuntime struct {
