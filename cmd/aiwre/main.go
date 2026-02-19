@@ -2439,6 +2439,76 @@ func fetchBootstrapWithFailover(relays []string) (*transport.BootstrapProfile, s
 	return nil, "", lastErr
 }
 
+type shardSelectionCacheEntry struct {
+	Shards    []int
+	ExpiresAt time.Time
+}
+
+var (
+	shardSelectionCacheTTL = 15 * time.Second
+	shardSelectionCacheMu  sync.Mutex
+	shardSelectionCache    = map[string]shardSelectionCacheEntry{}
+)
+
+func shardSelectionCacheKey(client *transport.Client, topic string, shardCount int) string {
+	base := ""
+	if client != nil {
+		base = strings.ToLower(strings.TrimSpace(client.BaseURL))
+	}
+	return base + "|" + strings.ToLower(strings.TrimSpace(topic)) + "|" + strconv.Itoa(shardCount)
+}
+
+func getShardSelectionCache(client *transport.Client, topic string, shardCount int, target int) []int {
+	if target <= 0 {
+		return nil
+	}
+	key := shardSelectionCacheKey(client, topic, shardCount)
+	now := time.Now().UTC()
+	shardSelectionCacheMu.Lock()
+	defer shardSelectionCacheMu.Unlock()
+	entry, ok := shardSelectionCache[key]
+	if !ok {
+		return nil
+	}
+	if now.After(entry.ExpiresAt) {
+		delete(shardSelectionCache, key)
+		return nil
+	}
+	out := append([]int{}, entry.Shards...)
+	if len(out) > target {
+		out = out[:target]
+	}
+	return out
+}
+
+func setShardSelectionCache(client *transport.Client, topic string, shardCount int, shards []int) {
+	if len(shards) == 0 {
+		return
+	}
+	out := make([]int, 0, len(shards))
+	seen := map[int]struct{}{}
+	for _, s := range shards {
+		if s < 0 || s >= shardCount {
+			continue
+		}
+		if _, ok := seen[s]; ok {
+			continue
+		}
+		seen[s] = struct{}{}
+		out = append(out, s)
+	}
+	if len(out) == 0 {
+		return
+	}
+	key := shardSelectionCacheKey(client, topic, shardCount)
+	shardSelectionCacheMu.Lock()
+	shardSelectionCache[key] = shardSelectionCacheEntry{
+		Shards:    out,
+		ExpiresAt: time.Now().UTC().Add(shardSelectionCacheTTL),
+	}
+	shardSelectionCacheMu.Unlock()
+}
+
 func collectRecentSignalIDs(client *transport.Client, topic string, limit int, shardCount int, cursorFile string) ([]string, error) {
 	if limit <= 0 {
 		limit = 20
@@ -2466,6 +2536,68 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 		incrementalLimit = incrementalFeedMinLimit
 	}
 	state := loadCursorState(cursorFile)
+	sem := make(chan struct{}, 4)
+
+	// Fast path: reuse recently active shard set for a short TTL to avoid
+	// repeated full-shard head scans during bursty pull loops.
+	cachedShards := getShardSelectionCache(client, topic, shardCount, targetShards)
+	if len(cachedShards) > 0 {
+		type shardResp struct {
+			shard int
+			resp  *transport.CursorFeedResponse
+			err   error
+		}
+		respCh := make(chan shardResp, len(cachedShards))
+		var wg sync.WaitGroup
+		for _, shard := range cachedShards {
+			wg.Add(1)
+			go func(s int) {
+				defer wg.Done()
+				sem <- struct{}{}
+				defer func() { <-sem }()
+
+				if savedCursor, ok := state.get(topic, s); ok {
+					resp, err := feedCursorWithRetry(client, topic, s, savedCursor, incrementalLimit, 5)
+					if err == nil && resp != nil {
+						respCh <- shardResp{shard: s, resp: resp, err: nil}
+						return
+					}
+				}
+
+				head, err := feedCursorWithRetry(client, topic, s, 0, 1, 5)
+				if err != nil || head == nil {
+					respCh <- shardResp{shard: s, err: err}
+					return
+				}
+				tailCursor := head.MaxSeq - int64(perShard)
+				if tailCursor < 0 {
+					tailCursor = 0
+				}
+				resp, err := feedCursorWithRetry(client, topic, s, tailCursor, perShard, 5)
+				respCh <- shardResp{shard: s, resp: resp, err: err}
+			}(shard)
+		}
+		wg.Wait()
+		close(respCh)
+
+		entries := make([]transport.FeedEntry, 0, limit*2)
+		okPulled := 0
+		for item := range respCh {
+			if item.err != nil || item.resp == nil {
+				continue
+			}
+			okPulled++
+			state.set(topic, item.shard, item.resp.NextCursor)
+			entries = append(entries, item.resp.Entries...)
+		}
+		if okPulled > 0 {
+			_ = saveCursorState(cursorFile, state)
+			if len(entries) == 0 {
+				return nil, nil
+			}
+			return collectIDsFromEntries(entries, limit), nil
+		}
+	}
 
 	type shardMeta struct {
 		shard int
@@ -2476,7 +2608,6 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 		m   shardMeta
 		err error
 	}
-	sem := make(chan struct{}, 4)
 	metaCh := make(chan metaResult, shardCount)
 	var wg sync.WaitGroup
 	for shard := 0; shard < shardCount; shard++ {
@@ -2524,6 +2655,11 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 	if len(metas) > targetShards {
 		metas = metas[:targetShards]
 	}
+	selectedShards := make([]int, 0, len(metas))
+	for _, m := range metas {
+		selectedShards = append(selectedShards, m.shard)
+	}
+	setShardSelectionCache(client, topic, shardCount, selectedShards)
 
 	type shardResp struct {
 		shard int
@@ -2577,27 +2713,7 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 	if len(entries) == 0 {
 		return nil, nil
 	}
-
-	sort.Slice(entries, func(i, j int) bool {
-		if entries[i].Timestamp == entries[j].Timestamp {
-			return entries[i].ID < entries[j].ID
-		}
-		return entries[i].Timestamp > entries[j].Timestamp
-	})
-
-	ids := make([]string, 0, limit)
-	seen := map[string]struct{}{}
-	for _, e := range entries {
-		if _, ok := seen[e.ID]; ok {
-			continue
-		}
-		seen[e.ID] = struct{}{}
-		ids = append(ids, e.ID)
-		if len(ids) >= limit {
-			break
-		}
-	}
-	return ids, nil
+	return collectIDsFromEntries(entries, limit), nil
 }
 
 func downloadAndStoreSignals(client *transport.Client, ids []string, outDir string, verifyAdmission bool, admission *security.AdmissionPolicy, warn bool) int {

@@ -506,3 +506,30 @@ func TestPullAndDecryptChatWithFailoverEmptyRelays(t *testing.T) {
 		t.Fatalf("expected error for empty relay candidates")
 	}
 }
+
+func TestShardSelectionCacheSetGet(t *testing.T) {
+	shardSelectionCacheMu.Lock()
+	shardSelectionCache = map[string]shardSelectionCacheEntry{}
+	shardSelectionCacheMu.Unlock()
+
+	client := transport.NewClient("https://relay.aiwre.io")
+	setShardSelectionCache(client, "global.announce", 32, []int{3, 2, 2, -1, 99})
+
+	got := getShardSelectionCache(client, "global.announce", 32, 8)
+	want := []int{3, 2}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("cache get mismatch: got=%v want=%v", got, want)
+	}
+
+	limited := getShardSelectionCache(client, "global.announce", 32, 1)
+	if !reflect.DeepEqual(limited, []int{3}) {
+		t.Fatalf("cache limit mismatch: got=%v", limited)
+	}
+
+	// Ensure callers receive a copy, not shared backing storage.
+	got[0] = 11
+	again := getShardSelectionCache(client, "global.announce", 32, 8)
+	if !reflect.DeepEqual(again, want) {
+		t.Fatalf("cache should be immutable to callers: got=%v want=%v", again, want)
+	}
+}
