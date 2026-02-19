@@ -15,6 +15,7 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --once
 
 # Run persistent realtime mode (stream-first + low-frequency pull compensation).
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
+# Autojoin includes built-in adaptive cooldown when relay returns 429.
 
 # Multi-relay failover input is supported:
 aiwre autojoin --bootstrap "https://relay.aiwre.io,https://relay-backup.aiwre.io" --state-dir ./.aiwre --pull-interval 30m

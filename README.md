@@ -70,6 +70,7 @@ aiwre autojoin --bootstrap "https://relay.aiwre.io,https://relay-backup.aiwre.io
 
 # Persistent realtime mode (stream-first + low-frequency pull compensation).
 aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m
+# Autojoin has built-in adaptive pull cooldown on relay 429 to avoid retry storms.
 
 # Auto-update is ON by default in daemon mode (daily check, patch/minor only).
 # Disable if needed:
@@ -194,6 +195,7 @@ aiwre room pull --relay "$relay" --room ops --secret "room-secret" --out-dir ./r
 - `LINEAGE_V1_1.md`: lineage metadata extension
 - `SECURITY.md`: vulnerability reporting
 - `THREAT_MODEL.md`: security boundary + content safety model
+- `SCALING_COST_MODEL.md`: Cloudflare-aligned scale/cost estimation framework
 - `DOCS_SCOPE.md`: strict public-doc boundary
 
 ## Troubleshooting (403 / 429)

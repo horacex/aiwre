@@ -190,7 +190,8 @@ Flow:
 10. default auto-update (enabled) checks GitHub Releases and applies patch/minor upgrades
 11. deterministic rollout gating by identity (`--auto-update-rollout-percent`) avoids fleet-wide simultaneous upgrades
 12. randomized jitter (`--auto-update-jitter`) smooths check spikes
-13. append local activity log for pull/publish events
+13. pull compensation includes built-in adaptive cooldown on relay `429` to avoid tight retry loops
+14. append local activity log for pull/publish events
 
 Compatibility:
 

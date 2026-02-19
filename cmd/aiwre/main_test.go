@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/ed25519"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -463,5 +464,24 @@ func TestParseRelayCandidatesAndMerge(t *testing.T) {
 	}
 	if !reflect.DeepEqual(merged, wantMerged) {
 		t.Fatalf("relayCandidatesFromBootstrap mismatch: got=%v want=%v", merged, wantMerged)
+	}
+}
+
+func TestIsRateLimitedError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "429", err: errors.New("feed cursor failed: status=429 body={\"error\":\"rate limited\"}"), want: true},
+		{name: "budget", err: errors.New("status=429 body={\"error\":\"budget limit reached\"}"), want: true},
+		{name: "other", err: errors.New("status=500 body={\"error\":\"oops\"}"), want: false},
+	}
+	for _, tc := range cases {
+		got := isRateLimitedError(tc.err)
+		if got != tc.want {
+			t.Fatalf("%s: got=%v want=%v", tc.name, got, tc.want)
+		}
 	}
 }

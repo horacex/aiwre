@@ -1750,6 +1750,7 @@ func runAutojoin(args []string) error {
 	fmt.Println("runtime_mode:", "daemon")
 	if *pullInterval > 0 {
 		fmt.Println("pull_compensation_interval:", pullInterval.String())
+		fmt.Println("pull_compensation_backoff:", "adaptive_on_429")
 	} else {
 		fmt.Println("pull_compensation_interval:", "disabled")
 	}
@@ -1781,6 +1782,8 @@ func runAutojoin(args []string) error {
 		defer pullTicker.Stop()
 		pullC = pullTicker.C
 	}
+	pullCooldownUntil := map[string]time.Time{}
+	pullBackoff := map[string]time.Duration{}
 
 	var updateTicker *time.Ticker
 	var updateC <-chan time.Time
@@ -1798,6 +1801,12 @@ func runAutojoin(args []string) error {
 		case <-pullC:
 			cycleAdmission := security.NewAdmissionPolicy()
 			for _, topic := range topics {
+				now := time.Now().UTC()
+				if until, ok := pullCooldownUntil[topic]; ok && now.Before(until) {
+					remain := until.Sub(now).Round(time.Second)
+					fmt.Fprintln(os.Stderr, "info: pull compensation cooldown:", topic, "remaining", remain)
+					continue
+				}
 				res, usedRelay, err := pullTopicShardedWithFailover(
 					relayCandidates,
 					topic,
@@ -1810,9 +1819,27 @@ func runAutojoin(args []string) error {
 					cursorStatePath(inboxDir),
 				)
 				if err != nil {
+					if isRateLimitedError(err) {
+						base := pullBackoff[topic]
+						if base <= 0 {
+							base = *pullInterval
+							if base <= 0 {
+								base = 2 * time.Minute
+							}
+						}
+						wait := jitterBackoff(base)
+						if wait < 10*time.Second {
+							wait = 10 * time.Second
+						}
+						pullCooldownUntil[topic] = now.Add(wait)
+						pullBackoff[topic] = growBackoff(base, 6*time.Hour)
+						fmt.Fprintln(os.Stderr, "warn: pull compensation rate-limited:", topic, "cooldown", wait.Round(time.Second))
+					}
 					fmt.Fprintln(os.Stderr, "warn: pull compensation failed:", topic, err)
 					continue
 				}
+				delete(pullCooldownUntil, topic)
+				delete(pullBackoff, topic)
 				if res.Downloaded > 0 {
 					fmt.Println("compensate_downloaded:", topic, res.Downloaded)
 				}
@@ -2292,6 +2319,20 @@ func sleepWithContext(ctx context.Context, d time.Duration) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+func isRateLimitedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	v := strings.ToLower(strings.TrimSpace(err.Error()))
+	if v == "" {
+		return false
+	}
+	return strings.Contains(v, "status=429") ||
+		strings.Contains(v, " rate limited") ||
+		strings.Contains(v, "\"error\":\"rate limited\"") ||
+		strings.Contains(v, "\"error\":\"budget limit reached\"")
 }
 
 func pullTopicSharded(client *transport.Client, topic string, limit int, outDir string, verifyAdmission bool, warn bool, shardCount int, admission *security.AdmissionPolicy, cursorFile string) (*pullResult, error) {
