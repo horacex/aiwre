@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/horacex/aiwre/internal/protocol"
 )
 
 func TestDMTopicDeterministic(t *testing.T) {
@@ -352,5 +354,60 @@ func TestNormalizeChatReplyMode(t *testing.T) {
 	}
 	if got := normalizeChatReplyMode("mention", "query"); got != "mention" {
 		t.Fatalf("mode mismatch: %s", got)
+	}
+}
+
+func TestParseAllowedMessageTypes(t *testing.T) {
+	types, err := parseAllowedMessageTypes("broadcast,query,response,heartbeat")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(types) != 4 {
+		t.Fatalf("unexpected type count: %d", len(types))
+	}
+	if _, err := parseAllowedMessageTypes("broadcast,unknown_type"); err == nil {
+		t.Fatalf("expected invalid type error")
+	}
+}
+
+func TestContentPolicyCheck(t *testing.T) {
+	p, err := newContentPolicy(10, "broadcast", "global.")
+	if err != nil {
+		t.Fatalf("policy create failed: %v", err)
+	}
+	okMsg := &protocol.Message{
+		Topic: "global.announce",
+		Type:  protocol.TypeBroadcast,
+		Body:  "hello",
+	}
+	if err := p.check(okMsg, okMsg.Topic); err != nil {
+		t.Fatalf("unexpected policy reject: %v", err)
+	}
+
+	tooLarge := &protocol.Message{
+		Topic: "global.announce",
+		Type:  protocol.TypeBroadcast,
+		Body:  "hello world over ten bytes",
+	}
+	if err := p.check(tooLarge, tooLarge.Topic); err == nil {
+		t.Fatalf("expected body size rejection")
+	}
+
+	wrongType := &protocol.Message{
+		Topic: "global.announce",
+		Type:  protocol.TypeQuery,
+		Body:  "hi",
+	}
+	if err := p.check(wrongType, wrongType.Topic); err == nil {
+		t.Fatalf("expected type rejection")
+	}
+
+	wrongTopic := &protocol.Message{
+		Topic: "room.ops",
+		Type:  protocol.TypeBroadcast,
+		Body:  "hi",
+	}
+	if err := p.check(wrongTopic, wrongTopic.Topic); err == nil {
+		t.Fatalf("expected topic rejection")
 	}
 }

@@ -16,12 +16,12 @@ Address architectural and security critiques while preserving the current relay-
 
 ## Phase 1 (Receiver hardening defaults)
 
-- [ ] Add default receiver content policy profile in CLI:
-  - [ ] max body size
+- [x] Add default receiver content policy profile in CLI (first pass):
+  - [x] max body size
   - [ ] max metadata bytes/depth
-  - [ ] type/topic allowlist option
-  - [ ] unsafe-pattern quarantine mode
-- [ ] Add policy flags to `autojoin` and `stream`, with safe defaults.
+  - [x] type/topic allowlist option
+  - [x] quarantine mode for policy-rejected signals
+- [x] Add policy flags to `autojoin` and `stream`, with safe defaults.
 - [ ] Add policy outcomes to local activity report output.
 
 ## Phase 2 (Machine-native onboarding)

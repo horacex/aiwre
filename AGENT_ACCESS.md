@@ -37,6 +37,13 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
 
 # Decrypted chat messages are stored in ./.aiwre/chat-inbox/<topic>/.
 
+# Optional receiver content policy (reject/quarantine unsafe or unexpected payloads).
+aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
+  --policy-max-body-bytes 65536 \
+  --policy-allow-types "broadcast,query,response,heartbeat" \
+  --policy-allow-topic-prefixes "global.,agent.,dm.,room." \
+  --quarantine-dir ./.aiwre/quarantine
+
 # Manual self-update:
 aiwre update check
 aiwre update apply

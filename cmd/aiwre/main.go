@@ -1364,6 +1364,10 @@ func runAutojoin(args []string) error {
 	chatAutoReply := fs.Bool("chat-auto-reply", true, "Enable automatic DM/room reply behavior for configured chat topics")
 	chatReplyMinGap := fs.Duration("chat-reply-min-gap", 90*time.Second, "Minimum gap between automatic chat replies")
 	chatReplyDailyCap := fs.Int("chat-reply-daily-cap", 48, "Max automatic chat replies per UTC day")
+	policyMaxBodyBytes := fs.Int("policy-max-body-bytes", 65536, "Receiver content policy: maximum body bytes")
+	policyAllowTypes := fs.String("policy-allow-types", "broadcast,query,response,heartbeat", "Receiver content policy: allowed message types csv")
+	policyAllowTopicPrefixes := fs.String("policy-allow-topic-prefixes", "", "Receiver content policy: allowed topic prefixes csv (empty=all)")
+	quarantineDir := fs.String("quarantine-dir", "", "Directory for policy-rejected signals (default <state-dir>/quarantine)")
 	autoUpdate := fs.Bool("auto-update", true, "Enable automatic CLI self-update checks in daemon mode")
 	autoUpdateInterval := fs.Duration("auto-update-interval", 24*time.Hour, "Interval for automatic update checks")
 	autoUpdateAllowMajor := fs.Bool("auto-update-allow-major", false, "Allow automatic major version upgrades")
@@ -1511,6 +1515,20 @@ func runAutojoin(args []string) error {
 	fmt.Println("heartbeat_id:", pubResp.ID)
 	fmt.Println("state_dir:", *stateDir)
 	fmt.Println("auto_update:", *autoUpdate)
+	policy, err := newContentPolicy(*policyMaxBodyBytes, *policyAllowTypes, *policyAllowTopicPrefixes)
+	if err != nil {
+		return err
+	}
+	policyRejectDir := strings.TrimSpace(*quarantineDir)
+	if policyRejectDir == "" {
+		policyRejectDir = filepath.Join(*stateDir, "quarantine")
+	}
+	fmt.Println("policy_max_body_bytes:", policy.maxBodyBytes)
+	fmt.Println("policy_allow_types:", strings.Join(policy.allowedTypeStrings(), ","))
+	if len(policy.allowTopicPrefixes) > 0 {
+		fmt.Println("policy_allow_topic_prefixes:", strings.Join(policy.allowTopicPrefixes, ","))
+	}
+	fmt.Println("quarantine_dir:", policyRejectDir)
 	if chatRuntime != nil {
 		fmt.Println("chat_config:", chatRuntime.configPath)
 		fmt.Println("chat_topics:", strings.Join(chatRuntime.watchTopics(), ","))
@@ -1575,18 +1593,34 @@ func runAutojoin(args []string) error {
 					out = filepath.Join(out, sanitizeTopicForPath(t))
 					_ = os.MkdirAll(out, 0755)
 				}
-				var onSaved func(topic, id, path string)
-				if interaction != nil || chatRuntime != nil {
-					onSaved = func(sigTopic, id, path string) {
-						if interaction != nil {
-							if err := interaction.maybeAutoReplyFromPath(client, sigTopic, id, path); err != nil {
-								fmt.Fprintln(os.Stderr, "warn: interaction reply hook failed:", err)
-							}
+				onSaved := func(sigTopic, id, path string) {
+					kept, reason, err := enforceContentPolicyFromPath(path, sigTopic, policy, policyRejectDir)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "warn: content policy check failed:", err)
+						return
+					}
+					if !kept {
+						now := time.Now().UTC()
+						fmt.Println("quarantined_signal:", id, "topic:", sigTopic, "reason:", reason)
+						_ = appendActivity(*stateDir, activityEvent{
+							Time:      now.Format(time.RFC3339),
+							Action:    "quarantine",
+							Relay:     relay,
+							Topic:     sigTopic,
+							MessageID: id,
+							Count:     1,
+							Detail:    reason,
+						})
+						return
+					}
+					if interaction != nil {
+						if err := interaction.maybeAutoReplyFromPath(client, sigTopic, id, path); err != nil {
+							fmt.Fprintln(os.Stderr, "warn: interaction reply hook failed:", err)
 						}
-						if chatRuntime != nil {
-							if err := chatRuntime.handleSaved(client, sigTopic, id, path); err != nil {
-								fmt.Fprintln(os.Stderr, "warn: chat runtime hook failed:", err)
-							}
+					}
+					if chatRuntime != nil {
+						if err := chatRuntime.handleSaved(client, sigTopic, id, path); err != nil {
+							fmt.Fprintln(os.Stderr, "warn: chat runtime hook failed:", err)
 						}
 					}
 				}
@@ -1784,6 +1818,10 @@ func runStream(args []string) error {
 	skipVerify := fs.Bool("skip-verify", false, "Skip local admission verification on streamed messages")
 	duration := fs.Duration("duration", 0, "Optional runtime limit (e.g. 10m). 0 means run until interrupted")
 	handler := fs.String("handler", "", "Optional executable to run on each newly saved signal (args: <file_path>). Env: AIWRE_TOPIC, AIWRE_SIGNAL_ID, AIWRE_RELAY")
+	policyMaxBodyBytes := fs.Int("policy-max-body-bytes", 65536, "Receiver content policy: maximum body bytes")
+	policyAllowTypes := fs.String("policy-allow-types", "broadcast,query,response,heartbeat", "Receiver content policy: allowed message types csv")
+	policyAllowTopicPrefixes := fs.String("policy-allow-topic-prefixes", "", "Receiver content policy: allowed topic prefixes csv (empty=all)")
+	quarantineDir := fs.String("quarantine-dir", "", "Directory for policy-rejected signals (default <out-dir>/quarantine)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -1792,6 +1830,14 @@ func runStream(args []string) error {
 	}
 	if err := os.MkdirAll(*outDir, 0755); err != nil {
 		return err
+	}
+	policy, err := newContentPolicy(*policyMaxBodyBytes, *policyAllowTypes, *policyAllowTopicPrefixes)
+	if err != nil {
+		return err
+	}
+	policyRejectDir := strings.TrimSpace(*quarantineDir)
+	if policyRejectDir == "" {
+		policyRejectDir = filepath.Join(*outDir, "quarantine")
 	}
 
 	resolvedRelay, profile, _ := resolveBootstrap(*relay)
@@ -1919,13 +1965,37 @@ func runStream(args []string) error {
 					continue
 				}
 				if ok {
-					statsMu.Lock()
-					s.downloaded++
-					statsMu.Unlock()
-					fmt.Println("stream_saved:", ev.Entry.ID, "topic:", topic)
 					if strings.TrimSpace(*handler) != "" {
 						outPath := filepath.Join(writeDir, ev.Entry.ID+".signal.md")
+						kept, reason, err := enforceContentPolicyFromPath(outPath, topic, policy, policyRejectDir)
+						if err != nil {
+							fmt.Fprintln(os.Stderr, "warn: stream policy check failed:", err)
+							continue
+						}
+						if !kept {
+							fmt.Println("quarantined_signal:", ev.Entry.ID, "topic:", topic, "reason:", reason)
+							continue
+						}
+						statsMu.Lock()
+						s.downloaded++
+						statsMu.Unlock()
+						fmt.Println("stream_saved:", ev.Entry.ID, "topic:", topic)
 						go runSignalHandler(ctx, *handler, resolvedRelay, topic, ev.Entry.ID, outPath)
+					} else {
+						outPath := filepath.Join(writeDir, ev.Entry.ID+".signal.md")
+						kept, reason, err := enforceContentPolicyFromPath(outPath, topic, policy, policyRejectDir)
+						if err != nil {
+							fmt.Fprintln(os.Stderr, "warn: stream policy check failed:", err)
+							continue
+						}
+						if !kept {
+							fmt.Println("quarantined_signal:", ev.Entry.ID, "topic:", topic, "reason:", reason)
+							continue
+						}
+						statsMu.Lock()
+						s.downloaded++
+						statsMu.Unlock()
+						fmt.Println("stream_saved:", ev.Entry.ID, "topic:", topic)
 					}
 				}
 			}
@@ -2851,6 +2921,170 @@ func runSignalHandler(parent context.Context, handler string, relay string, topi
 		}
 		fmt.Fprintln(os.Stderr, "warn: handler failed:", err)
 	}
+}
+
+type contentPolicy struct {
+	maxBodyBytes       int
+	allowTypes         map[protocol.MessageType]struct{}
+	allowTopicPrefixes []string
+}
+
+func newContentPolicy(maxBodyBytes int, allowTypesCSV, allowTopicPrefixesCSV string) (*contentPolicy, error) {
+	if maxBodyBytes < 0 {
+		return nil, errors.New("policy-max-body-bytes must be >= 0")
+	}
+	types, err := parseAllowedMessageTypes(allowTypesCSV)
+	if err != nil {
+		return nil, err
+	}
+	prefixes := parseTopicsCSV(allowTopicPrefixesCSV)
+	return &contentPolicy{
+		maxBodyBytes:       maxBodyBytes,
+		allowTypes:         types,
+		allowTopicPrefixes: prefixes,
+	}, nil
+}
+
+func parseAllowedMessageTypes(raw string) (map[protocol.MessageType]struct{}, error) {
+	parts := parseCSV(raw)
+	if len(parts) == 0 {
+		return map[protocol.MessageType]struct{}{}, nil
+	}
+	out := map[protocol.MessageType]struct{}{}
+	for _, p := range parts {
+		mt := protocol.MessageType(strings.TrimSpace(strings.ToLower(p)))
+		switch mt {
+		case protocol.TypeBroadcast, protocol.TypeQuery, protocol.TypeResponse, protocol.TypeHeartbeat:
+			out[mt] = struct{}{}
+		default:
+			return nil, fmt.Errorf("invalid policy message type: %s", p)
+		}
+	}
+	return out, nil
+}
+
+func (p *contentPolicy) allowedTypeStrings() []string {
+	if p == nil || len(p.allowTypes) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(p.allowTypes))
+	for t := range p.allowTypes {
+		out = append(out, string(t))
+	}
+	sort.Strings(out)
+	return out
+}
+
+func (p *contentPolicy) check(msg *protocol.Message, topicHint string) error {
+	if p == nil || msg == nil {
+		return nil
+	}
+	if p.maxBodyBytes > 0 && len([]byte(msg.Body)) > p.maxBodyBytes {
+		return fmt.Errorf("body too large: %d > %d", len([]byte(msg.Body)), p.maxBodyBytes)
+	}
+	if len(p.allowTypes) > 0 {
+		if _, ok := p.allowTypes[msg.Type]; !ok {
+			return fmt.Errorf("message type %s not allowed by policy", msg.Type)
+		}
+	}
+	if len(p.allowTopicPrefixes) > 0 {
+		topic := strings.TrimSpace(msg.Topic)
+		if topic == "" {
+			topic = strings.TrimSpace(topicHint)
+		}
+		allowed := false
+		for _, prefix := range p.allowTopicPrefixes {
+			if strings.HasPrefix(topic, prefix) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return fmt.Errorf("topic %s not allowed by policy prefixes", topic)
+		}
+	}
+	return nil
+}
+
+func enforceContentPolicyFromPath(path, topic string, policy *contentPolicy, quarantineDir string) (bool, string, error) {
+	if policy == nil {
+		return true, "", nil
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return false, "", err
+	}
+	msg, err := protocol.ParseSignalMD(string(raw))
+	if err != nil || msg == nil {
+		if err == nil {
+			err = errors.New("empty parsed signal")
+		}
+		reason := "invalid_signal_format"
+		qerr := quarantineSignalFile(path, topic, quarantineDir, reason)
+		if qerr != nil {
+			return false, reason, qerr
+		}
+		return false, reason, nil
+	}
+	if err := policy.check(msg, topic); err != nil {
+		reason := sanitizePolicyReason(err.Error())
+		qerr := quarantineSignalFile(path, topic, quarantineDir, reason)
+		if qerr != nil {
+			return false, reason, qerr
+		}
+		return false, reason, nil
+	}
+	return true, "", nil
+}
+
+func sanitizePolicyReason(raw string) string {
+	s := strings.ToLower(strings.TrimSpace(raw))
+	if s == "" {
+		return "policy_reject"
+	}
+	var b strings.Builder
+	for _, ch := range s {
+		ok := (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')
+		if ok {
+			b.WriteRune(ch)
+			continue
+		}
+		if ch == '_' || ch == '-' {
+			b.WriteRune(ch)
+			continue
+		}
+		if ch == ' ' {
+			b.WriteRune('_')
+			continue
+		}
+	}
+	out := strings.Trim(b.String(), "_-")
+	if out == "" {
+		return "policy_reject"
+	}
+	return out
+}
+
+func quarantineSignalFile(srcPath, topic, baseDir, reason string) error {
+	if strings.TrimSpace(baseDir) == "" {
+		baseDir = "./quarantine"
+	}
+	targetDir := filepath.Join(baseDir, sanitizeTopicForPath(topic), reason)
+	if err := os.MkdirAll(targetDir, 0755); err != nil {
+		return err
+	}
+	targetPath := filepath.Join(targetDir, filepath.Base(srcPath))
+	if err := os.Rename(srcPath, targetPath); err == nil {
+		return nil
+	}
+	raw, err := os.ReadFile(srcPath)
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(targetPath, raw, 0644); err != nil {
+		return err
+	}
+	return os.Remove(srcPath)
 }
 
 type chatConfigFile struct {

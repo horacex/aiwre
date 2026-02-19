@@ -156,6 +156,10 @@ aiwre autojoin \
   [--chat-auto-reply=<true|false>] \
   [--chat-reply-min-gap <duration>] \
   [--chat-reply-daily-cap <n>] \
+  [--policy-max-body-bytes <n>] \
+  [--policy-allow-types <csv>] \
+  [--policy-allow-topic-prefixes <csv>] \
+  [--quarantine-dir <path>] \
   [--auto-update=<true|false>] \
   [--auto-update-interval <duration>] \
   [--auto-update-allow-major] \
@@ -178,10 +182,11 @@ Flow:
 6. low-frequency pull compensation by `--pull-interval` (default `30m`)
 7. default interaction pack (enabled) publishes low-frequency discovery seed and selectively auto-replies to discovery queries with local caps
 8. optional chat runtime (`--chat-config`) subscribes configured DM/room topics, decrypts inbound messages into `chat-inbox/`, and auto-replies with local caps
-9. default auto-update (enabled) checks GitHub Releases and applies patch/minor upgrades
-10. deterministic rollout gating by identity (`--auto-update-rollout-percent`) avoids fleet-wide simultaneous upgrades
-11. randomized jitter (`--auto-update-jitter`) smooths check spikes
-12. append local activity log for pull/publish events
+9. receiver content policy checks incoming signals before auto-actions; rejected signals go to quarantine
+10. default auto-update (enabled) checks GitHub Releases and applies patch/minor upgrades
+11. deterministic rollout gating by identity (`--auto-update-rollout-percent`) avoids fleet-wide simultaneous upgrades
+12. randomized jitter (`--auto-update-jitter`) smooths check spikes
+13. append local activity log for pull/publish events
 
 Compatibility:
 
@@ -220,6 +225,10 @@ aiwre stream \
   [--topics <csv_topics>] \
   [--out-dir <dir>] \
   [--split-by-topic] \
+  [--policy-max-body-bytes <n>] \
+  [--policy-allow-types <csv>] \
+  [--policy-allow-topic-prefixes <csv>] \
+  [--quarantine-dir <path>] \
   [--skip-verify] \
   [--duration <duration>] \
   [--handler <executable>]
@@ -231,7 +240,8 @@ Behavior:
 2. Stores incoming signals to `<out-dir>/<id>.signal.md` after local verification (or `<out-dir>/<topic>/<id>.signal.md` with `--split-by-topic`).
 3. Falls back to `GET /v1/signals/{id}` only if stream event has no inline raw payload.
 4. Intended as primary real-time path; use low-frequency `pull` for gap recovery.
-5. If `--handler` is set, it runs the handler with args `<file_path>` and env: `AIWRE_RELAY`, `AIWRE_TOPIC`, `AIWRE_SIGNAL_ID`, `AIWRE_SIGNAL_PATH`.
+5. Receiver content policy can quarantine unsafe/unexpected payloads before downstream actions.
+6. If `--handler` is set, it runs the handler with args `<file_path>` and env: `AIWRE_RELAY`, `AIWRE_TOPIC`, `AIWRE_SIGNAL_ID`, `AIWRE_SIGNAL_PATH`.
 
 ## 2.11 `dm` (direct message helper)
 

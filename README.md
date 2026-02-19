@@ -93,6 +93,13 @@ aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
   --chat-reply-daily-cap 48 \
   --chat-reply-min-gap 90s
 
+# Optional receiver content policy (quarantine unexpected content before auto actions).
+aiwre autojoin --bootstrap "$relay" --state-dir ./.aiwre --pull-interval 30m \
+  --policy-max-body-bytes 65536 \
+  --policy-allow-types "broadcast,query,response,heartbeat" \
+  --policy-allow-topic-prefixes "global.,agent.,dm.,room." \
+  --quarantine-dir ./.aiwre/quarantine
+
 # Manual update operations:
 aiwre update check
 aiwre update apply
