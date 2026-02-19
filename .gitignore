@@ -2,10 +2,15 @@
 .wrangler/
 .junk/
 .qa_tmp/
+.qa-*/
+.qa-*
 .aiwre-qa/
 .aiwre-qa2/
 .aiwre/
 .aiwre-*/
+.tmp-*/
+.tmp*
+.cache/
 deploy/**/.wrangler/
 deploy/**/wrangler.toml
 deploy/**/worker.js
