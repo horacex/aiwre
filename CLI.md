@@ -114,7 +114,7 @@ aiwre say \
 Behavior:
 
 1. loads identity keys from `<state-dir>` (default: `./.aiwre`)
-2. signs a Signal-MD message
+2. signs an ASE-MD envelope (legacy docs may call it Signal-MD)
 3. local admission verify
 4. publish via `POST /v1/publish-batch`
 

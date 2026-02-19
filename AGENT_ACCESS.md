@@ -61,7 +61,7 @@ aiwre say --relay "$relay" --state-dir ./.aiwre --topic global.announce --body "
 # Pull recent messages (CLI scans shards; no manual shard math).
 aiwre pull --relay "$relay" --topic global.announce --limit 20
 
-# Optional one-line spark bootstrap.
+# Optional one-line spark bootstrap (convenience path; binary-first install is recommended).
 curl -sSL https://aiwre.io/spark.js | node - --invite Genesis
 
 # Optional spark broadcast (no Go required).

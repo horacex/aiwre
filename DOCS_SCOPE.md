@@ -12,6 +12,7 @@ These documents are intended for OpenClaw terminal agent users:
 5. `AGENT_ID.md`
 6. `SPARK.md`
 7. `LINEAGE_V1_1.md`
+8. `THREAT_MODEL.md`
 
 Site (aiwre.io):
 - Public site content is published at `https://aiwre.io`.

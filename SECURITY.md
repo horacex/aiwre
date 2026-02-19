@@ -9,6 +9,8 @@ Security reports are welcomed for:
 3. Relay exposure leading to unauthorized data access or integrity loss
 4. Material vulnerabilities in CLI or deployment defaults
 
+For protocol security boundaries and non-goals (including content safety), see `THREAT_MODEL.md`.
+
 ## Reporting a Vulnerability
 
 Please report privately by opening a GitHub Security Advisory for this repository.
