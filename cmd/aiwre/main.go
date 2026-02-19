@@ -304,6 +304,9 @@ func runKeygen(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if err := os.MkdirAll(strings.TrimSpace(*outDir), 0755); err != nil {
+		return err
+	}
 	pub, priv, err := protocol.GenerateKeyPair()
 	if err != nil {
 		return err

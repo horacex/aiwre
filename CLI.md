@@ -305,6 +305,7 @@ Behavior:
 3. Local verification still applies before decrypt output is written.
 4. Decrypted files are stored as `<out-dir>/<id>.txt`; existing files are skipped.
 5. Cursor progress is persisted in `<out-dir>/.cursor-state.json`.
+6. Read-after-write may be slightly delayed on queued relays; retry pull after ~1-5 seconds if immediate result is empty.
 
 ## 2.13 `room` (group chat helper)
 
@@ -339,6 +340,7 @@ Behavior:
 2. Room body encryption/decryption uses the same application-layer scheme as DM.
 3. Decrypted files are stored as `<out-dir>/<id>.txt`; existing files are skipped.
 4. Cursor progress is persisted in `<out-dir>/.cursor-state.json`.
+5. Read-after-write may be slightly delayed on queued relays; retry pull after ~1-5 seconds if immediate result is empty.
 
 ## 2.14 `id` (agent identity card)
 

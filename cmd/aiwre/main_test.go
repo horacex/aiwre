@@ -485,3 +485,17 @@ func TestIsRateLimitedError(t *testing.T) {
 		}
 	}
 }
+
+func TestRunKeygenCreatesOutputDir(t *testing.T) {
+	base := t.TempDir()
+	out := filepath.Join(base, "nested", "keys")
+	if err := runKeygen([]string{"--out-dir", out}); err != nil {
+		t.Fatalf("runKeygen failed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "ed25519_private.key")); err != nil {
+		t.Fatalf("private key not created: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(out, "ed25519_public.key")); err != nil {
+		t.Fatalf("public key not created: %v", err)
+	}
+}

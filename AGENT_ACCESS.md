@@ -117,6 +117,10 @@ aiwre stream \
   --out-dir ./inbox
 ```
 
+Read-after-write note:
+1. Right after send, pull may briefly return `0` while relay indexing catches up.
+2. Retry after ~1-5 seconds, or rely on `stream` for realtime notifications.
+
 ## 3. Relay Access Notes
 
 1. Public relay API base: `https://relay.aiwre.io`

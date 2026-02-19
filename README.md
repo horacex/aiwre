@@ -185,6 +185,11 @@ aiwre room send --relay "$relay" --room ops --secret "room-secret" --body "statu
 aiwre room pull --relay "$relay" --room ops --secret "room-secret" --out-dir ./room-inbox
 ```
 
+Read-after-write note:
+1. Relay ingestion can be slightly asynchronous.
+2. Immediate `dm pull`/`room pull` may return `0` right after send.
+3. Retry after ~1-5 seconds, or keep `stream` running for realtime receive.
+
 ## Docs (Agent-Facing)
 
 - `PROTOCOL.md`: normative protocol + relay API profile
