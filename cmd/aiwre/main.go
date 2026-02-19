@@ -1439,6 +1439,7 @@ const (
 	defaultAgentCardTopic    = "agent.card"
 	defaultUpdateRepo        = "horacex/aiwre"
 	defaultUpdateAttestPub   = ""
+	payloadFetchWorkerMax    = 4
 )
 
 type agentCardRecord struct {
@@ -2723,48 +2724,110 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return 0
 	}
-	downloaded := 0
-	for _, id := range ids {
-		outPath := filepath.Join(outDir, id+".signal.md")
-		if _, err := os.Stat(outPath); err == nil {
-			// Already cached locally: skip remote payload fetch to reduce relay read costs.
-			continue
-		}
-		signal, err := getSignalWithRetry(client, id, 4, 250*time.Millisecond)
-		if err != nil {
-			if warn {
-				fmt.Fprintln(os.Stderr, "warn: skip", id, ":", err)
+	workers := payloadFetchWorkers(len(ids))
+	if workers <= 1 {
+		downloaded := 0
+		for _, id := range ids {
+			outPath := filepath.Join(outDir, id+".signal.md")
+			if _, err := os.Stat(outPath); err == nil {
+				// Already cached locally: skip remote payload fetch to reduce relay read costs.
+				continue
 			}
-			continue
-		}
-		msg, err := protocol.ParseSignalMD(signal)
-		if err != nil {
-			if warn {
-				fmt.Fprintln(os.Stderr, "warn: parse fail", id, ":", err)
-			}
-			continue
-		}
-		if verifyAdmission {
-			if err := admission.Verify(msg); err != nil {
+			signal, err := getSignalWithRetry(client, id, 4, 250*time.Millisecond)
+			if err != nil {
 				if warn {
-					fmt.Fprintln(os.Stderr, "warn: verify fail", id, ":", err)
+					fmt.Fprintln(os.Stderr, "warn: skip", id, ":", err)
 				}
 				continue
 			}
-		} else if err := protocol.VerifyMessage(msg); err != nil {
-			if warn {
-				fmt.Fprintln(os.Stderr, "warn: sig fail", id, ":", err)
+			msg, err := protocol.ParseSignalMD(signal)
+			if err != nil {
+				if warn {
+					fmt.Fprintln(os.Stderr, "warn: parse fail", id, ":", err)
+				}
+				continue
 			}
-			continue
-		}
-		if err := os.WriteFile(outPath, []byte(signal), 0644); err != nil {
-			if warn {
-				fmt.Fprintln(os.Stderr, "warn: write fail", id, ":", err)
+			if verifyAdmission {
+				if err := admission.Verify(msg); err != nil {
+					if warn {
+						fmt.Fprintln(os.Stderr, "warn: verify fail", id, ":", err)
+					}
+					continue
+				}
+			} else if err := protocol.VerifyMessage(msg); err != nil {
+				if warn {
+					fmt.Fprintln(os.Stderr, "warn: sig fail", id, ":", err)
+				}
+				continue
 			}
-			continue
+			if err := os.WriteFile(outPath, []byte(signal), 0644); err != nil {
+				if warn {
+					fmt.Fprintln(os.Stderr, "warn: write fail", id, ":", err)
+				}
+				continue
+			}
+			downloaded++
 		}
-		downloaded++
+		return downloaded
 	}
+
+	jobs := make(chan string, len(ids))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	downloaded := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range jobs {
+				outPath := filepath.Join(outDir, id+".signal.md")
+				if _, err := os.Stat(outPath); err == nil {
+					continue
+				}
+				signal, err := getSignalWithRetry(client, id, 4, 250*time.Millisecond)
+				if err != nil {
+					if warn {
+						fmt.Fprintln(os.Stderr, "warn: skip", id, ":", err)
+					}
+					continue
+				}
+				msg, err := protocol.ParseSignalMD(signal)
+				if err != nil {
+					if warn {
+						fmt.Fprintln(os.Stderr, "warn: parse fail", id, ":", err)
+					}
+					continue
+				}
+				if verifyAdmission {
+					if err := admission.Verify(msg); err != nil {
+						if warn {
+							fmt.Fprintln(os.Stderr, "warn: verify fail", id, ":", err)
+						}
+						continue
+					}
+				} else if err := protocol.VerifyMessage(msg); err != nil {
+					if warn {
+						fmt.Fprintln(os.Stderr, "warn: sig fail", id, ":", err)
+					}
+					continue
+				}
+				if err := os.WriteFile(outPath, []byte(signal), 0644); err != nil {
+					if warn {
+						fmt.Fprintln(os.Stderr, "warn: write fail", id, ":", err)
+					}
+					continue
+				}
+				mu.Lock()
+				downloaded++
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, id := range ids {
+		jobs <- id
+	}
+	close(jobs)
+	wg.Wait()
 	return downloaded
 }
 
@@ -4622,64 +4685,151 @@ func pullAndDecryptChat(client *transport.Client, topic, secret string, limit in
 	if verifyAdmission {
 		admission = security.NewAdmissionPolicy()
 	}
-	saved := 0
-	for _, id := range ids {
-		outPath := filepath.Join(outDir, id+".txt")
-		if _, err := os.Stat(outPath); err == nil {
-			// Deterministic file naming avoids re-downloading/decrypting the same message on every pull.
-			continue
-		}
-		signal, err := getSignalWithRetry(client, id, 4, 250*time.Millisecond)
-		if err != nil {
-			continue
-		}
-		msg, err := protocol.ParseSignalMD(signal)
-		if err != nil {
-			continue
-		}
-		if verifyAdmission {
-			if err := admission.Verify(msg); err != nil {
+	workers := payloadFetchWorkers(len(ids))
+	if workers <= 1 {
+		saved := 0
+		for _, id := range ids {
+			outPath := filepath.Join(outDir, id+".txt")
+			if _, err := os.Stat(outPath); err == nil {
+				// Deterministic file naming avoids re-downloading/decrypting the same message on every pull.
 				continue
 			}
-		} else if err := protocol.VerifyMessage(msg); err != nil {
-			continue
+			signal, err := getSignalWithRetry(client, id, 4, 250*time.Millisecond)
+			if err != nil {
+				continue
+			}
+			msg, err := protocol.ParseSignalMD(signal)
+			if err != nil {
+				continue
+			}
+			if verifyAdmission {
+				if err := admission.Verify(msg); err != nil {
+					continue
+				}
+			} else if err := protocol.VerifyMessage(msg); err != nil {
+				continue
+			}
+			if msg.Topic != topic {
+				continue
+			}
+			mode, _ := msg.Metadata["chat"].(string)
+			if mode != chatMode {
+				continue
+			}
+			enc, _ := msg.Metadata["enc"].(string)
+			if enc != "aes-256-gcm" {
+				continue
+			}
+			nonce, _ := msg.Metadata["enc_nonce"].(string)
+			if nonce == "" {
+				continue
+			}
+			plain, err := decryptChatBody(secret, topic, msg.Body, nonce)
+			if err != nil {
+				continue
+			}
+			out := strings.Builder{}
+			out.WriteString("id: " + msg.ID + "\n")
+			out.WriteString("timestamp: " + msg.Timestamp + "\n")
+			out.WriteString("sender: " + msg.Sender + "\n")
+			out.WriteString("topic: " + msg.Topic + "\n")
+			out.WriteString("type: " + string(msg.Type) + "\n")
+			out.WriteString("---\n")
+			out.WriteString(plain)
+			if !strings.HasSuffix(plain, "\n") {
+				out.WriteString("\n")
+			}
+			if err := os.WriteFile(outPath, []byte(out.String()), 0644); err != nil {
+				continue
+			}
+			saved++
 		}
-		if msg.Topic != topic {
-			continue
-		}
-		mode, _ := msg.Metadata["chat"].(string)
-		if mode != chatMode {
-			continue
-		}
-		enc, _ := msg.Metadata["enc"].(string)
-		if enc != "aes-256-gcm" {
-			continue
-		}
-		nonce, _ := msg.Metadata["enc_nonce"].(string)
-		if nonce == "" {
-			continue
-		}
-		plain, err := decryptChatBody(secret, topic, msg.Body, nonce)
-		if err != nil {
-			continue
-		}
-		out := strings.Builder{}
-		out.WriteString("id: " + msg.ID + "\n")
-		out.WriteString("timestamp: " + msg.Timestamp + "\n")
-		out.WriteString("sender: " + msg.Sender + "\n")
-		out.WriteString("topic: " + msg.Topic + "\n")
-		out.WriteString("type: " + string(msg.Type) + "\n")
-		out.WriteString("---\n")
-		out.WriteString(plain)
-		if !strings.HasSuffix(plain, "\n") {
-			out.WriteString("\n")
-		}
-		if err := os.WriteFile(outPath, []byte(out.String()), 0644); err != nil {
-			continue
-		}
-		saved++
+		return saved, nil
 	}
+
+	jobs := make(chan string, len(ids))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	saved := 0
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for id := range jobs {
+				outPath := filepath.Join(outDir, id+".txt")
+				if _, err := os.Stat(outPath); err == nil {
+					continue
+				}
+				signal, err := getSignalWithRetry(client, id, 4, 250*time.Millisecond)
+				if err != nil {
+					continue
+				}
+				msg, err := protocol.ParseSignalMD(signal)
+				if err != nil {
+					continue
+				}
+				if verifyAdmission {
+					if err := admission.Verify(msg); err != nil {
+						continue
+					}
+				} else if err := protocol.VerifyMessage(msg); err != nil {
+					continue
+				}
+				if msg.Topic != topic {
+					continue
+				}
+				mode, _ := msg.Metadata["chat"].(string)
+				if mode != chatMode {
+					continue
+				}
+				enc, _ := msg.Metadata["enc"].(string)
+				if enc != "aes-256-gcm" {
+					continue
+				}
+				nonce, _ := msg.Metadata["enc_nonce"].(string)
+				if nonce == "" {
+					continue
+				}
+				plain, err := decryptChatBody(secret, topic, msg.Body, nonce)
+				if err != nil {
+					continue
+				}
+				out := strings.Builder{}
+				out.WriteString("id: " + msg.ID + "\n")
+				out.WriteString("timestamp: " + msg.Timestamp + "\n")
+				out.WriteString("sender: " + msg.Sender + "\n")
+				out.WriteString("topic: " + msg.Topic + "\n")
+				out.WriteString("type: " + string(msg.Type) + "\n")
+				out.WriteString("---\n")
+				out.WriteString(plain)
+				if !strings.HasSuffix(plain, "\n") {
+					out.WriteString("\n")
+				}
+				if err := os.WriteFile(outPath, []byte(out.String()), 0644); err != nil {
+					continue
+				}
+				mu.Lock()
+				saved++
+				mu.Unlock()
+			}
+		}()
+	}
+	for _, id := range ids {
+		jobs <- id
+	}
+	close(jobs)
+	wg.Wait()
 	return saved, nil
+}
+
+func payloadFetchWorkers(n int) int {
+	if n <= 1 {
+		return 1
+	}
+	if n < payloadFetchWorkerMax {
+		return n
+	}
+	return payloadFetchWorkerMax
 }
 
 func pullAndDecryptChatWithFailover(relays []string, topic, secret string, limit int, outDir string, verifyAdmission bool, chatMode string) (int, string, error) {

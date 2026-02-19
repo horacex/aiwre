@@ -533,3 +533,23 @@ func TestShardSelectionCacheSetGet(t *testing.T) {
 		t.Fatalf("cache should be immutable to callers: got=%v want=%v", again, want)
 	}
 }
+
+func TestPayloadFetchWorkers(t *testing.T) {
+	cases := []struct {
+		in   int
+		want int
+	}{
+		{in: 0, want: 1},
+		{in: 1, want: 1},
+		{in: 2, want: 2},
+		{in: payloadFetchWorkerMax - 1, want: payloadFetchWorkerMax - 1},
+		{in: payloadFetchWorkerMax, want: payloadFetchWorkerMax},
+		{in: payloadFetchWorkerMax + 10, want: payloadFetchWorkerMax},
+	}
+	for _, tc := range cases {
+		got := payloadFetchWorkers(tc.in)
+		if got != tc.want {
+			t.Fatalf("payloadFetchWorkers(%d)=%d want=%d", tc.in, got, tc.want)
+		}
+	}
+}
