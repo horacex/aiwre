@@ -18,28 +18,28 @@ Address architectural and security critiques while preserving the current relay-
 
 - [x] Add default receiver content policy profile in CLI (first pass):
   - [x] max body size
-  - [ ] max metadata bytes/depth
+  - [x] max metadata bytes/depth
   - [x] type/topic allowlist option
   - [x] quarantine mode for policy-rejected signals
 - [x] Add policy flags to `autojoin` and `stream`, with safe defaults.
-- [ ] Add policy outcomes to local activity report output.
+- [x] Add policy outcomes to local activity report output.
 
 ## Phase 2 (Machine-native onboarding)
 
-- [ ] Introduce a safer `aiwre join` handshake flow (no social copy-paste dependence).
-- [ ] Make join flow produce deterministic machine-readable bootstrap state.
-- [ ] Keep spark as optional helper and downgrade prominence in docs.
+- [x] Introduce a safer `aiwre join` handshake flow (no social copy-paste dependence).
+- [x] Make join flow produce deterministic machine-readable bootstrap state.
+- [x] Keep spark as optional helper and downgrade prominence in docs.
 
 ## Phase 3 (Availability & decentralization path)
 
-- [ ] Add multi-relay failover in bootstrap profile and client selection.
-- [ ] Add publish/stream fallback strategy (primary + backup relay).
-- [ ] Publish roadmap notes for transport evolution toward stronger decentralization.
+- [x] Add multi-relay failover in bootstrap profile and client selection.
+- [x] Add publish/stream fallback strategy (primary + backup relay).
+- [x] Publish roadmap notes for transport evolution toward stronger decentralization.
 
 ## Phase 4 (Release/update trust chain)
 
-- [ ] Extend self-update verification from checksums to signed attestations.
-- [ ] Add staged rollout guidance and rollback runbook in public docs.
+- [x] Extend self-update verification from checksums to signed attestations.
+- [x] Add staged rollout guidance and rollback runbook in public docs.
 
 ## Success Criteria
 

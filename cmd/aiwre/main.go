@@ -65,6 +65,8 @@ func main() {
 		err = runPublish(os.Args[2:])
 	case "say":
 		err = runSay(os.Args[2:])
+	case "join":
+		err = runJoin(os.Args[2:])
 	case "pull":
 		err = runPull(os.Args[2:])
 	case "autojoin":
@@ -101,6 +103,7 @@ Commands:
   verify   Verify signature and admission policy
   publish  Publish a signed Signal-MD to relay
   say      Sign + publish a plaintext broadcast (Hello World helper)
+  join     Machine-native bootstrap handshake + join state snapshot
   pull     Pull recent signals from relay
   autojoin Zero-approval bootstrap + stream-first daemon
   update   Check/apply CLI updates from GitHub releases
@@ -129,11 +132,103 @@ func runVersion(_ []string) error {
 	return nil
 }
 
+type joinStateSnapshot struct {
+	Version         int      `json:"version"`
+	GeneratedAt     string   `json:"generated_at"`
+	BootstrapInput  string   `json:"bootstrap_input"`
+	SelectedRelay   string   `json:"selected_relay"`
+	RelayCandidates []string `json:"relay_candidates"`
+	JoinMode        string   `json:"join_mode"`
+	AiwreV          string   `json:"aiwre_v"`
+	Capabilities    []string `json:"capabilities,omitempty"`
+	ShardCount      int      `json:"shard_count"`
+	DefaultTopics   []string `json:"default_topics,omitempty"`
+	HeartbeatTopic  string   `json:"heartbeat_topic,omitempty"`
+	ReportTopic     string   `json:"report_topic,omitempty"`
+	Identity        string   `json:"identity"`
+	CreatedIdentity bool     `json:"created_identity"`
+	BootstrapDigest string   `json:"bootstrap_digest"`
+}
+
+func runJoin(args []string) error {
+	fs := flag.NewFlagSet("join", flag.ContinueOnError)
+	bootstrap := fs.String("bootstrap", "", "Bootstrap URL or comma-separated relay/bootstrap URLs")
+	stateDir := fs.String("state-dir", ".aiwre", "State directory for identity and join state")
+	out := fs.String("out", "", "Join state output file (default <state-dir>/join-state.json)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if strings.TrimSpace(*bootstrap) == "" {
+		return errors.New("--bootstrap is required")
+	}
+	relay, profile, err := resolveBootstrap(*bootstrap)
+	if err != nil {
+		return err
+	}
+	relays := relayCandidatesFromBootstrap(*bootstrap, relay, profile)
+
+	privPath := filepath.Join(*stateDir, "ed25519_private.key")
+	pubPath := filepath.Join(*stateDir, "ed25519_public.key")
+	_, pub, created, err := loadOrCreateKeyPair(privPath, pubPath)
+	if err != nil {
+		return err
+	}
+	identity := protocol.Fingerprint(pub)
+	if strings.TrimSpace(*out) == "" {
+		*out = filepath.Join(*stateDir, "join-state.json")
+	}
+	digestRaw, _ := json.Marshal(profile)
+	digest := sha256.Sum256(digestRaw)
+	snap := joinStateSnapshot{
+		Version:         1,
+		GeneratedAt:     time.Now().UTC().Format(time.RFC3339),
+		BootstrapInput:  strings.TrimSpace(*bootstrap),
+		SelectedRelay:   relay,
+		RelayCandidates: relays,
+		JoinMode:        strings.TrimSpace(profile.Join),
+		AiwreV:          strings.TrimSpace(profile.AiwreV),
+		Capabilities:    append([]string{}, profile.Capabilities...),
+		ShardCount:      profile.ShardCount,
+		DefaultTopics:   append([]string{}, profile.DefaultTopics...),
+		HeartbeatTopic:  strings.TrimSpace(profile.HeartbeatTopic),
+		ReportTopic:     strings.TrimSpace(profile.ReportTopic),
+		Identity:        identity,
+		CreatedIdentity: created,
+		BootstrapDigest: hex.EncodeToString(digest[:]),
+	}
+	if err := os.MkdirAll(filepath.Dir(*out), 0755); err != nil {
+		return err
+	}
+	raw, err := json.MarshalIndent(snap, "", "  ")
+	if err != nil {
+		return err
+	}
+	tmp := *out + ".tmp"
+	if err := os.WriteFile(tmp, append(raw, '\n'), 0644); err != nil {
+		return err
+	}
+	if err := os.Rename(tmp, *out); err != nil {
+		return err
+	}
+	fmt.Println("join: true")
+	fmt.Println("relay:", relay)
+	fmt.Println("relays:", strings.Join(relays, ","))
+	fmt.Println("identity:", identity)
+	fmt.Println("created_identity:", created)
+	fmt.Println("join_state:", *out)
+	return nil
+}
+
 func runUpdate(args []string) error {
 	if len(args) < 1 {
 		return errors.New("update subcommand required: check|apply\n" + updateUsageText())
 	}
-	switch strings.ToLower(strings.TrimSpace(args[0])) {
+	sub := strings.ToLower(strings.TrimSpace(args[0]))
+	if sub == "-h" || sub == "--help" || sub == "help" {
+		fmt.Println(updateUsageText())
+		return nil
+	}
+	switch sub {
 	case "check":
 		return runUpdateCheck(args[1:])
 	case "apply":
@@ -147,12 +242,14 @@ func runUpdateCheck(args []string) error {
 	fs := flag.NewFlagSet("update check", flag.ContinueOnError)
 	repo := fs.String("repo", defaultUpdateRepo, "GitHub repo in owner/name format")
 	allowMajor := fs.Bool("allow-major", false, "Whether to treat major upgrades as eligible updates")
+	requireAttestation := fs.Bool("require-attestation", false, "Require signed checksums attestation for update eligibility")
+	attestationPubKey := fs.String("attestation-pubkey", defaultUpdateAttestPub, "Base64/hex Ed25519 public key for checksums attestation")
 	current := fs.String("current", strings.TrimSpace(buildVersion), "Current version (default build version)")
 	timeout := fs.Duration("timeout", 12*time.Second, "HTTP timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	info, err := checkForUpdate(strings.TrimSpace(*repo), strings.TrimSpace(*current), *allowMajor, *timeout)
+	info, err := checkForUpdate(strings.TrimSpace(*repo), strings.TrimSpace(*current), *allowMajor, *requireAttestation, strings.TrimSpace(*attestationPubKey), *timeout)
 	if err != nil {
 		return err
 	}
@@ -174,12 +271,14 @@ func runUpdateApply(args []string) error {
 	fs := flag.NewFlagSet("update apply", flag.ContinueOnError)
 	repo := fs.String("repo", defaultUpdateRepo, "GitHub repo in owner/name format")
 	allowMajor := fs.Bool("allow-major", false, "Allow major version auto-upgrade")
+	requireAttestation := fs.Bool("require-attestation", false, "Require signed checksums attestation before applying update")
+	attestationPubKey := fs.String("attestation-pubkey", defaultUpdateAttestPub, "Base64/hex Ed25519 public key for checksums attestation")
 	current := fs.String("current", strings.TrimSpace(buildVersion), "Current version (default build version)")
 	timeout := fs.Duration("timeout", 25*time.Second, "HTTP timeout")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	res, err := applyUpdate(strings.TrimSpace(*repo), strings.TrimSpace(*current), *allowMajor, *timeout)
+	res, err := applyUpdate(strings.TrimSpace(*repo), strings.TrimSpace(*current), *allowMajor, *requireAttestation, strings.TrimSpace(*attestationPubKey), *timeout)
 	if err != nil {
 		return err
 	}
@@ -362,13 +461,14 @@ func runPublish(args []string) error {
 			return fmt.Errorf("local verify failed: %w", err)
 		}
 	}
-	resolvedRelay, _, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
-	resp, err := client.PublishFast(string(raw))
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
+	resp, usedRelay, err := publishFastWithFailover(relayCandidates, string(raw))
 	if err != nil {
 		return err
 	}
 	fmt.Println("published:", resp.Accepted)
+	fmt.Println("relay:", usedRelay)
 	fmt.Println("id:", resp.ID)
 	fmt.Println("stored_at:", resp.StoredAt)
 	return nil
@@ -427,13 +527,14 @@ func runSay(args []string) error {
 	if err := policy.Verify(msg); err != nil {
 		return fmt.Errorf("local verify failed: %w", err)
 	}
-	resolvedRelay, _, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
-	resp, err := client.PublishFast(raw)
+	resolvedRelay, profile, _ := resolveBootstrap(*relay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
+	resp, usedRelay, err := publishFastWithFailover(relayCandidates, raw)
 	if err != nil {
 		return err
 	}
 	fmt.Println("say_sent:", resp.Accepted)
+	fmt.Println("relay:", usedRelay)
 	fmt.Println("topic:", msg.Topic)
 	fmt.Println("type:", msg.Type)
 	fmt.Println("id:", resp.ID)
@@ -454,20 +555,16 @@ func runPull(args []string) error {
 		return errors.New("--relay is required")
 	}
 	resolvedRelay, profile, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
 	// Pull requires shard_count/default_topics; if bootstrap fetch failed earlier, try once more.
 	if profile == nil || profile.ShardCount < 1 {
-		p2, err := client.FetchBootstrap()
+		p2, usedRelay, err := fetchBootstrapWithFailover(relayCandidates)
 		if err != nil {
 			return err
 		}
 		profile = p2
 		if profile != nil && strings.TrimSpace(profile.Relay) != "" {
-			r2 := strings.TrimRight(profile.Relay, "/")
-			if r2 != "" && r2 != resolvedRelay {
-				resolvedRelay = r2
-				client = transport.NewClient(resolvedRelay)
-			}
+			resolvedRelay = usedRelay
 		}
 	}
 	resolvedTopic := strings.TrimSpace(*topic)
@@ -486,8 +583,8 @@ func runPull(args []string) error {
 	if !*skipVerify {
 		admission = security.NewAdmissionPolicy()
 	}
-	res, err := pullTopicSharded(
-		client,
+	res, usedRelay, err := pullTopicShardedWithFailover(
+		relayCandidates,
 		resolvedTopic,
 		*limit,
 		*outDir,
@@ -501,6 +598,7 @@ func runPull(args []string) error {
 		return err
 	}
 	fmt.Println("feed_mode:", res.Mode)
+	fmt.Println("relay:", usedRelay)
 	fmt.Println("feed_topic:", res.Topic)
 	fmt.Println("feed_count:", res.Count)
 	fmt.Println("downloaded:", res.Downloaded)
@@ -1326,6 +1424,7 @@ const (
 	incrementalFeedMinLimit  = 50
 	defaultAgentCardTopic    = "agent.card"
 	defaultUpdateRepo        = "horacex/aiwre"
+	defaultUpdateAttestPub   = ""
 )
 
 type agentCardRecord struct {
@@ -1365,6 +1464,8 @@ func runAutojoin(args []string) error {
 	chatReplyMinGap := fs.Duration("chat-reply-min-gap", 90*time.Second, "Minimum gap between automatic chat replies")
 	chatReplyDailyCap := fs.Int("chat-reply-daily-cap", 48, "Max automatic chat replies per UTC day")
 	policyMaxBodyBytes := fs.Int("policy-max-body-bytes", 65536, "Receiver content policy: maximum body bytes")
+	policyMaxMetadataBytes := fs.Int("policy-max-metadata-bytes", 8192, "Receiver content policy: maximum metadata bytes")
+	policyMaxMetadataDepth := fs.Int("policy-max-metadata-depth", 4, "Receiver content policy: maximum metadata nesting depth")
 	policyAllowTypes := fs.String("policy-allow-types", "broadcast,query,response,heartbeat", "Receiver content policy: allowed message types csv")
 	policyAllowTopicPrefixes := fs.String("policy-allow-topic-prefixes", "", "Receiver content policy: allowed topic prefixes csv (empty=all)")
 	quarantineDir := fs.String("quarantine-dir", "", "Directory for policy-rejected signals (default <state-dir>/quarantine)")
@@ -1372,6 +1473,8 @@ func runAutojoin(args []string) error {
 	autoUpdateInterval := fs.Duration("auto-update-interval", 24*time.Hour, "Interval for automatic update checks")
 	autoUpdateAllowMajor := fs.Bool("auto-update-allow-major", false, "Allow automatic major version upgrades")
 	autoUpdateRepo := fs.String("auto-update-repo", defaultUpdateRepo, "GitHub repo used for self-updates (owner/name)")
+	autoUpdateRequireAttestation := fs.Bool("auto-update-require-attestation", false, "Require signed checksums attestation for automatic updates")
+	autoUpdateAttestPubKey := fs.String("auto-update-attestation-pubkey", defaultUpdateAttestPub, "Ed25519 public key (base64/hex) for update attestation verification")
 	autoUpdateRollout := fs.Int("auto-update-rollout-percent", 100, "Deterministic rollout percentage [0..100] by agent identity")
 	autoUpdateJitter := fs.Duration("auto-update-jitter", 15*time.Minute, "Randomized delay added before each periodic update check")
 	if err := fs.Parse(args); err != nil {
@@ -1388,6 +1491,7 @@ func runAutojoin(args []string) error {
 	if err != nil {
 		return err
 	}
+	relayCandidates := relayCandidatesFromBootstrap(*bootstrap, relay, profile)
 	client := transport.NewClient(relay)
 
 	privPath := filepath.Join(*stateDir, "ed25519_private.key")
@@ -1443,8 +1547,8 @@ func runAutojoin(args []string) error {
 	}
 	admission := security.NewAdmissionPolicy()
 	for _, topic := range topics {
-		res, err := pullTopicSharded(
-			client,
+		res, usedRelay, err := pullTopicShardedWithFailover(
+			relayCandidates,
 			topic,
 			*limit,
 			inboxDir,
@@ -1462,7 +1566,7 @@ func runAutojoin(args []string) error {
 		_ = appendActivity(*stateDir, activityEvent{
 			Time:   time.Now().UTC().Format(time.RFC3339),
 			Action: "pull",
-			Relay:  relay,
+			Relay:  usedRelay,
 			Topic:  topic,
 			Count:  res.Downloaded,
 			Detail: fmt.Sprintf("feed_count=%d mode=%s phase=bootstrap", res.Count, res.Mode),
@@ -1491,14 +1595,14 @@ func runAutojoin(args []string) error {
 	if err != nil {
 		return err
 	}
-	pubResp, err := client.PublishFast(raw)
+	pubResp, usedRelay, err := publishFastWithFailover(relayCandidates, raw)
 	if err != nil {
 		return err
 	}
 	if err := appendActivity(*stateDir, activityEvent{
 		Time:      time.Now().UTC().Format(time.RFC3339),
 		Action:    "publish",
-		Relay:     relay,
+		Relay:     usedRelay,
 		Topic:     heartbeatTopic,
 		MessageID: pubResp.ID,
 		Count:     1,
@@ -1508,6 +1612,7 @@ func runAutojoin(args []string) error {
 
 	fmt.Println("autojoin: true")
 	fmt.Println("relay:", relay)
+	fmt.Println("relay_candidates:", strings.Join(relayCandidates, ","))
 	fmt.Println("join_mode:", profile.Join)
 	fmt.Println("identity:", selfID)
 	fmt.Println("topics:", strings.Join(topics, ","))
@@ -1515,7 +1620,7 @@ func runAutojoin(args []string) error {
 	fmt.Println("heartbeat_id:", pubResp.ID)
 	fmt.Println("state_dir:", *stateDir)
 	fmt.Println("auto_update:", *autoUpdate)
-	policy, err := newContentPolicy(*policyMaxBodyBytes, *policyAllowTypes, *policyAllowTopicPrefixes)
+	policy, err := newContentPolicy(*policyMaxBodyBytes, *policyMaxMetadataBytes, *policyMaxMetadataDepth, *policyAllowTypes, *policyAllowTopicPrefixes)
 	if err != nil {
 		return err
 	}
@@ -1524,6 +1629,8 @@ func runAutojoin(args []string) error {
 		policyRejectDir = filepath.Join(*stateDir, "quarantine")
 	}
 	fmt.Println("policy_max_body_bytes:", policy.maxBodyBytes)
+	fmt.Println("policy_max_metadata_bytes:", policy.maxMetadataBytes)
+	fmt.Println("policy_max_metadata_depth:", policy.maxMetadataDepth)
 	fmt.Println("policy_allow_types:", strings.Join(policy.allowedTypeStrings(), ","))
 	if len(policy.allowTopicPrefixes) > 0 {
 		fmt.Println("policy_allow_topic_prefixes:", strings.Join(policy.allowTopicPrefixes, ","))
@@ -1593,7 +1700,11 @@ func runAutojoin(args []string) error {
 					out = filepath.Join(out, sanitizeTopicForPath(t))
 					_ = os.MkdirAll(out, 0755)
 				}
-				onSaved := func(sigTopic, id, path string) {
+				onSaved := func(savedClient *transport.Client, sigTopic, id, path string) {
+					activityRelay := relay
+					if savedClient != nil && strings.TrimSpace(savedClient.BaseURL) != "" {
+						activityRelay = strings.TrimSpace(savedClient.BaseURL)
+					}
 					kept, reason, err := enforceContentPolicyFromPath(path, sigTopic, policy, policyRejectDir)
 					if err != nil {
 						fmt.Fprintln(os.Stderr, "warn: content policy check failed:", err)
@@ -1605,7 +1716,7 @@ func runAutojoin(args []string) error {
 						_ = appendActivity(*stateDir, activityEvent{
 							Time:      now.Format(time.RFC3339),
 							Action:    "quarantine",
-							Relay:     relay,
+							Relay:     activityRelay,
 							Topic:     sigTopic,
 							MessageID: id,
 							Count:     1,
@@ -1614,17 +1725,17 @@ func runAutojoin(args []string) error {
 						return
 					}
 					if interaction != nil {
-						if err := interaction.maybeAutoReplyFromPath(client, sigTopic, id, path); err != nil {
+						if err := interaction.maybeAutoReplyFromPath(savedClient, sigTopic, id, path); err != nil {
 							fmt.Fprintln(os.Stderr, "warn: interaction reply hook failed:", err)
 						}
 					}
 					if chatRuntime != nil {
-						if err := chatRuntime.handleSaved(client, sigTopic, id, path); err != nil {
+						if err := chatRuntime.handleSaved(savedClient, sigTopic, id, path); err != nil {
 							fmt.Fprintln(os.Stderr, "warn: chat runtime hook failed:", err)
 						}
 					}
 				}
-				runAutojoinStreamWorker(ctx, client, relay, t, out, base, max, strings.TrimSpace(*handler), onSaved, func(received, saved, errs int) {
+				runAutojoinStreamWorker(ctx, relayCandidates, t, out, base, max, strings.TrimSpace(*handler), onSaved, func(received, saved, errs int) {
 					statsMu.Lock()
 					st := stats[t]
 					st.received += received
@@ -1646,10 +1757,11 @@ func runAutojoin(args []string) error {
 		fmt.Println("auto_update_interval:", autoUpdateInterval.String())
 		fmt.Println("auto_update_rollout_percent:", *autoUpdateRollout)
 		fmt.Println("auto_update_jitter:", autoUpdateJitter.String())
+		fmt.Println("auto_update_require_attestation:", *autoUpdateRequireAttestation)
 	}
 
 	if *autoUpdate {
-		applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), selfID, *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, false)
+		applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), selfID, *autoUpdateAllowMajor, *autoUpdateRequireAttestation, strings.TrimSpace(*autoUpdateAttestPubKey), *autoUpdateRollout, *autoUpdateJitter, false)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "warn: auto-update check failed:", err)
 		}
@@ -1686,8 +1798,8 @@ func runAutojoin(args []string) error {
 		case <-pullC:
 			cycleAdmission := security.NewAdmissionPolicy()
 			for _, topic := range topics {
-				res, err := pullTopicSharded(
-					client,
+				res, usedRelay, err := pullTopicShardedWithFailover(
+					relayCandidates,
 					topic,
 					*limit,
 					inboxDir,
@@ -1707,14 +1819,14 @@ func runAutojoin(args []string) error {
 				_ = appendActivity(*stateDir, activityEvent{
 					Time:   time.Now().UTC().Format(time.RFC3339),
 					Action: "pull",
-					Relay:  relay,
+					Relay:  usedRelay,
 					Topic:  topic,
 					Count:  res.Downloaded,
 					Detail: fmt.Sprintf("feed_count=%d mode=%s phase=compensate", res.Count, res.Mode),
 				})
 			}
 		case <-updateC:
-			applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), selfID, *autoUpdateAllowMajor, *autoUpdateRollout, *autoUpdateJitter, true)
+			applied, err := maybeAutoUpdate(*stateDir, *autoUpdateRepo, strings.TrimSpace(buildVersion), selfID, *autoUpdateAllowMajor, *autoUpdateRequireAttestation, strings.TrimSpace(*autoUpdateAttestPubKey), *autoUpdateRollout, *autoUpdateJitter, true)
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "warn: auto-update tick failed:", err)
 				continue
@@ -1763,6 +1875,8 @@ func runReport(args []string) error {
 	publishCount := 0
 	pullCount := 0
 	downloaded := 0
+	quarantined := 0
+	quarantineReasons := map[string]int{}
 	relays := map[string]struct{}{}
 	topics := map[string]struct{}{}
 	for _, ev := range events {
@@ -1778,20 +1892,29 @@ func runReport(args []string) error {
 		case "pull":
 			pullCount++
 			downloaded += ev.Count
+		case "quarantine":
+			quarantined++
+			reason := strings.TrimSpace(ev.Detail)
+			if reason == "" {
+				reason = "unspecified"
+			}
+			quarantineReasons[reason]++
 		}
 	}
 	relayList := sortedKeys(relays)
 	topicList := sortedKeys(topics)
 	if *format == "json" {
 		out := map[string]any{
-			"window_start": start.Format(time.RFC3339),
-			"window_hours": *hours,
-			"events":       len(events),
-			"published":    publishCount,
-			"pulls":        pullCount,
-			"downloaded":   downloaded,
-			"relays":       relayList,
-			"topics":       topicList,
+			"window_start":       start.Format(time.RFC3339),
+			"window_hours":       *hours,
+			"events":             len(events),
+			"published":          publishCount,
+			"pulls":              pullCount,
+			"downloaded":         downloaded,
+			"quarantined":        quarantined,
+			"quarantine_reasons": quarantineReasons,
+			"relays":             relayList,
+			"topics":             topicList,
 		}
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -1803,6 +1926,19 @@ func runReport(args []string) error {
 	fmt.Println("published:", publishCount)
 	fmt.Println("pulls:", pullCount)
 	fmt.Println("downloaded:", downloaded)
+	fmt.Println("quarantined:", quarantined)
+	if len(quarantineReasons) > 0 {
+		keys := make([]string, 0, len(quarantineReasons))
+		for k := range quarantineReasons {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys))
+		for _, k := range keys {
+			parts = append(parts, fmt.Sprintf("%s=%d", k, quarantineReasons[k]))
+		}
+		fmt.Println("quarantine_reasons:", strings.Join(parts, ","))
+	}
 	fmt.Println("relays:", strings.Join(relayList, ","))
 	fmt.Println("topics:", strings.Join(topicList, ","))
 	return nil
@@ -1819,6 +1955,8 @@ func runStream(args []string) error {
 	duration := fs.Duration("duration", 0, "Optional runtime limit (e.g. 10m). 0 means run until interrupted")
 	handler := fs.String("handler", "", "Optional executable to run on each newly saved signal (args: <file_path>). Env: AIWRE_TOPIC, AIWRE_SIGNAL_ID, AIWRE_RELAY")
 	policyMaxBodyBytes := fs.Int("policy-max-body-bytes", 65536, "Receiver content policy: maximum body bytes")
+	policyMaxMetadataBytes := fs.Int("policy-max-metadata-bytes", 8192, "Receiver content policy: maximum metadata bytes")
+	policyMaxMetadataDepth := fs.Int("policy-max-metadata-depth", 4, "Receiver content policy: maximum metadata nesting depth")
 	policyAllowTypes := fs.String("policy-allow-types", "broadcast,query,response,heartbeat", "Receiver content policy: allowed message types csv")
 	policyAllowTopicPrefixes := fs.String("policy-allow-topic-prefixes", "", "Receiver content policy: allowed topic prefixes csv (empty=all)")
 	quarantineDir := fs.String("quarantine-dir", "", "Directory for policy-rejected signals (default <out-dir>/quarantine)")
@@ -1831,7 +1969,7 @@ func runStream(args []string) error {
 	if err := os.MkdirAll(*outDir, 0755); err != nil {
 		return err
 	}
-	policy, err := newContentPolicy(*policyMaxBodyBytes, *policyAllowTypes, *policyAllowTopicPrefixes)
+	policy, err := newContentPolicy(*policyMaxBodyBytes, *policyMaxMetadataBytes, *policyMaxMetadataDepth, *policyAllowTypes, *policyAllowTopicPrefixes)
 	if err != nil {
 		return err
 	}
@@ -1841,20 +1979,15 @@ func runStream(args []string) error {
 	}
 
 	resolvedRelay, profile, _ := resolveBootstrap(*relay)
-	client := transport.NewClient(resolvedRelay)
+	relayCandidates := relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
 	if profile == nil || profile.ShardCount < 1 {
-		p2, err := client.FetchBootstrap()
+		p2, usedRelay, err := fetchBootstrapWithFailover(relayCandidates)
 		if err != nil {
 			return err
 		}
 		profile = p2
-		if profile != nil && strings.TrimSpace(profile.Relay) != "" {
-			r2 := strings.TrimRight(profile.Relay, "/")
-			if r2 != "" && r2 != resolvedRelay {
-				resolvedRelay = r2
-				client = transport.NewClient(resolvedRelay)
-			}
-		}
+		resolvedRelay = usedRelay
+		relayCandidates = relayCandidatesFromBootstrap(*relay, resolvedRelay, profile)
 	}
 	resolvedTopic := strings.TrimSpace(*topic)
 	wantTopics := make([]string, 0, 8)
@@ -1893,8 +2026,6 @@ func runStream(args []string) error {
 	stats := make([]*topicStats, 0, len(wantTopics))
 	var statsMu sync.Mutex
 	var wg sync.WaitGroup
-	errCh := make(chan error, len(wantTopics))
-
 	for _, t := range wantTopics {
 		topicName := strings.TrimSpace(t)
 		if topicName == "" {
@@ -1905,67 +2036,82 @@ func runStream(args []string) error {
 		stats = append(stats, st)
 		go func(topic string, s *topicStats) {
 			defer wg.Done()
-			streamURL, err := client.StreamURL(topic)
-			if err != nil {
-				statsMu.Lock()
-				s.errors++
-				statsMu.Unlock()
-				errCh <- err
-				return
-			}
-			conn, _, err := websocket.Dial(ctx, streamURL, nil)
-			if err != nil {
-				statsMu.Lock()
-				s.errors++
-				statsMu.Unlock()
-				errCh <- err
-				return
-			}
-			defer func() { _ = conn.Close(websocket.StatusNormalClosure, "bye") }()
-
+			backoff := 2 * time.Second
+			relayIdx := 0
 			for {
-				_, payload, err := conn.Read(ctx)
-				if err != nil {
-					if ctx.Err() != nil {
-						return
-					}
-					statsMu.Lock()
-					s.errors++
-					statsMu.Unlock()
-					errCh <- err
+				if ctx.Err() != nil {
 					return
 				}
-				var ev streamEvent
-				if err := json.Unmarshal(payload, &ev); err != nil {
+				currentRelay := relayCandidates[relayIdx%len(relayCandidates)]
+				currentClient := transport.NewClient(currentRelay)
+				streamURL, err := currentClient.StreamURL(topic)
+				if err != nil {
 					statsMu.Lock()
 					s.errors++
 					statsMu.Unlock()
+					relayIdx++
+					if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+						return
+					}
+					backoff = growBackoff(backoff, 2*time.Minute)
 					continue
 				}
-				if ev.Type == "welcome" {
-					// Print at most once per topic for easy debugging.
-					fmt.Println("stream_welcome:", ev.TS, "topic:", topic)
-					continue
-				}
-				if ev.Type != "signal" || ev.Entry == nil || ev.Entry.ID == "" {
-					continue
-				}
-				statsMu.Lock()
-				s.received++
-				statsMu.Unlock()
-
-				writeDir := *outDir
-				if *splitByTopic {
-					writeDir = filepath.Join(writeDir, sanitizeTopicForPath(topic))
-					_ = os.MkdirAll(writeDir, 0755)
-				}
-				ok, err := storeStreamSignal(client, &ev, writeDir, !*skipVerify, admission)
+				conn, _, err := websocket.Dial(ctx, streamURL, nil)
 				if err != nil {
-					fmt.Fprintln(os.Stderr, "warn: stream signal skipped:", ev.Entry.ID, err)
+					statsMu.Lock()
+					s.errors++
+					statsMu.Unlock()
+					relayIdx++
+					if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+						return
+					}
+					backoff = growBackoff(backoff, 2*time.Minute)
 					continue
 				}
-				if ok {
-					if strings.TrimSpace(*handler) != "" {
+				backoff = 2 * time.Second
+
+				for {
+					_, payload, err := conn.Read(ctx)
+					if err != nil {
+						_ = conn.Close(websocket.StatusNormalClosure, "bye")
+						if ctx.Err() != nil {
+							return
+						}
+						statsMu.Lock()
+						s.errors++
+						statsMu.Unlock()
+						relayIdx++
+						break
+					}
+					var ev streamEvent
+					if err := json.Unmarshal(payload, &ev); err != nil {
+						statsMu.Lock()
+						s.errors++
+						statsMu.Unlock()
+						continue
+					}
+					if ev.Type == "welcome" {
+						fmt.Println("stream_welcome:", ev.TS, "topic:", topic, "relay:", currentRelay)
+						continue
+					}
+					if ev.Type != "signal" || ev.Entry == nil || ev.Entry.ID == "" {
+						continue
+					}
+					statsMu.Lock()
+					s.received++
+					statsMu.Unlock()
+
+					writeDir := *outDir
+					if *splitByTopic {
+						writeDir = filepath.Join(writeDir, sanitizeTopicForPath(topic))
+						_ = os.MkdirAll(writeDir, 0755)
+					}
+					ok, err := storeStreamSignal(currentClient, &ev, writeDir, !*skipVerify, admission)
+					if err != nil {
+						fmt.Fprintln(os.Stderr, "warn: stream signal skipped:", ev.Entry.ID, err)
+						continue
+					}
+					if ok {
 						outPath := filepath.Join(writeDir, ev.Entry.ID+".signal.md")
 						kept, reason, err := enforceContentPolicyFromPath(outPath, topic, policy, policyRejectDir)
 						if err != nil {
@@ -1979,45 +2125,22 @@ func runStream(args []string) error {
 						statsMu.Lock()
 						s.downloaded++
 						statsMu.Unlock()
-						fmt.Println("stream_saved:", ev.Entry.ID, "topic:", topic)
-						go runSignalHandler(ctx, *handler, resolvedRelay, topic, ev.Entry.ID, outPath)
-					} else {
-						outPath := filepath.Join(writeDir, ev.Entry.ID+".signal.md")
-						kept, reason, err := enforceContentPolicyFromPath(outPath, topic, policy, policyRejectDir)
-						if err != nil {
-							fmt.Fprintln(os.Stderr, "warn: stream policy check failed:", err)
-							continue
+						fmt.Println("stream_saved:", ev.Entry.ID, "topic:", topic, "relay:", currentRelay)
+						if strings.TrimSpace(*handler) != "" {
+							go runSignalHandler(ctx, *handler, currentRelay, topic, ev.Entry.ID, outPath)
 						}
-						if !kept {
-							fmt.Println("quarantined_signal:", ev.Entry.ID, "topic:", topic, "reason:", reason)
-							continue
-						}
-						statsMu.Lock()
-						s.downloaded++
-						statsMu.Unlock()
-						fmt.Println("stream_saved:", ev.Entry.ID, "topic:", topic)
 					}
 				}
+				if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+					return
+				}
+				backoff = growBackoff(backoff, 2*time.Minute)
 			}
 		}(topicName, st)
 	}
 
-	wgDone := make(chan struct{})
-	go func() {
-		wg.Wait()
-		close(wgDone)
-	}()
-
-	select {
-	case <-ctx.Done():
-		<-wgDone
-	case err := <-errCh:
-		// Any topic failure should fail the command in single-topic mode.
-		// For multi-topic mode, we still return error to signal partial failure.
-		_ = err
-		stop()
-		<-wgDone
-	}
+	<-ctx.Done()
+	wg.Wait()
 
 	// Summary
 	statsMu.Lock()
@@ -2047,36 +2170,47 @@ func runStream(args []string) error {
 
 func runAutojoinStreamWorker(
 	ctx context.Context,
-	client *transport.Client,
-	relay string,
+	relays []string,
 	topic string,
 	outDir string,
 	reconnectBase time.Duration,
 	reconnectMax time.Duration,
 	handler string,
-	onSaved func(topic, id, path string),
+	onSaved func(client *transport.Client, topic, id, path string),
 	onUpdate func(received, saved, errs int),
 ) {
 	if onUpdate == nil {
 		onUpdate = func(int, int, int) {}
 	}
 	if onSaved == nil {
-		onSaved = func(string, string, string) {}
+		onSaved = func(*transport.Client, string, string, string) {}
 	}
-	streamURL, err := client.StreamURL(topic)
-	if err != nil {
+	if len(relays) == 0 {
 		onUpdate(0, 0, 1)
 		return
 	}
-
+	relayIdx := 0
 	backoff := reconnectBase
 	for {
 		if ctx.Err() != nil {
 			return
 		}
+		currentRelay := relays[relayIdx%len(relays)]
+		client := transport.NewClient(currentRelay)
+		streamURL, err := client.StreamURL(topic)
+		if err != nil {
+			onUpdate(0, 0, 1)
+			relayIdx++
+			if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+				return
+			}
+			backoff = growBackoff(backoff, reconnectMax)
+			continue
+		}
 		conn, _, err := websocket.Dial(ctx, streamURL, nil)
 		if err != nil {
 			onUpdate(0, 0, 1)
+			relayIdx++
 			if !sleepWithContext(ctx, jitterBackoff(backoff)) {
 				return
 			}
@@ -2113,9 +2247,9 @@ func runAutojoinStreamWorker(
 			}
 			if ok {
 				outPath := filepath.Join(outDir, ev.Entry.ID+".signal.md")
-				onSaved(topic, ev.Entry.ID, outPath)
+				onSaved(client, topic, ev.Entry.ID, outPath)
 				if strings.TrimSpace(handler) != "" {
-					go runSignalHandler(ctx, handler, relay, topic, ev.Entry.ID, outPath)
+					go runSignalHandler(ctx, handler, currentRelay, topic, ev.Entry.ID, outPath)
 				}
 				onUpdate(1, 1, 0)
 				continue
@@ -2125,6 +2259,7 @@ func runAutojoinStreamWorker(
 		if !sleepWithContext(ctx, jitterBackoff(backoff)) {
 			return
 		}
+		relayIdx++
 		backoff = growBackoff(backoff, reconnectMax)
 	}
 }
@@ -2190,6 +2325,63 @@ func pullTopicSharded(client *transport.Client, topic string, limit int, outDir 
 		Count:      len(ids),
 		Downloaded: downloaded,
 	}, nil
+}
+
+func pullTopicShardedWithFailover(relays []string, topic string, limit int, outDir string, verifyAdmission bool, warn bool, shardCount int, admission *security.AdmissionPolicy, cursorFile string) (*pullResult, string, error) {
+	if len(relays) == 0 {
+		return nil, "", errors.New("no relay candidates")
+	}
+	var lastErr error
+	for _, relay := range relays {
+		client := transport.NewClient(relay)
+		res, err := pullTopicSharded(client, topic, limit, outDir, verifyAdmission, warn, shardCount, admission, cursorFile)
+		if err == nil {
+			return res, relay, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("pull failed on all relays")
+	}
+	return nil, "", lastErr
+}
+
+func publishFastWithFailover(relays []string, raw string) (*transport.PublishResponse, string, error) {
+	if len(relays) == 0 {
+		return nil, "", errors.New("no relay candidates")
+	}
+	var lastErr error
+	for _, relay := range relays {
+		client := transport.NewClient(relay)
+		resp, err := client.PublishFast(raw)
+		if err == nil {
+			return resp, relay, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("publish failed on all relays")
+	}
+	return nil, "", lastErr
+}
+
+func fetchBootstrapWithFailover(relays []string) (*transport.BootstrapProfile, string, error) {
+	if len(relays) == 0 {
+		return nil, "", errors.New("no relay candidates")
+	}
+	var lastErr error
+	for _, relay := range relays {
+		client := transport.NewClient(relay)
+		profile, err := client.FetchBootstrap()
+		if err == nil && profile != nil {
+			return profile, relay, nil
+		}
+		lastErr = err
+	}
+	if lastErr == nil {
+		lastErr = errors.New("bootstrap fetch failed on all relays")
+	}
+	return nil, "", lastErr
 }
 
 func collectRecentSignalIDs(client *transport.Client, topic string, limit int, shardCount int, cursorFile string) ([]string, error) {
@@ -2465,22 +2657,38 @@ func storeStreamSignal(client *transport.Client, ev *streamEvent, outDir string,
 }
 
 func resolveBootstrap(raw string) (string, *transport.BootstrapProfile, error) {
-	relay := strings.TrimRight(raw, "/")
-	client := transport.NewClient(relay)
-	profile, err := client.FetchBootstrap()
-	if err == nil && profile != nil {
+	candidates := parseRelayCandidates(raw)
+	if len(candidates) == 0 {
+		return "", nil, errors.New("bootstrap is required")
+	}
+	var lastErr error
+	for _, candidate := range candidates {
+		relay := strings.TrimRight(candidate, "/")
+		client := transport.NewClient(relay)
+		profile, err := client.FetchBootstrap()
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if profile == nil {
+			continue
+		}
 		if profile.Relay != "" {
 			relay = strings.TrimRight(profile.Relay, "/")
 		}
 		if profile.Join == "" {
 			profile.Join = "permissionless"
 		}
+		profile.Relays = relayCandidatesFromBootstrap(raw, relay, profile)
 		return relay, profile, nil
 	}
-	// Fallback: treat input as direct relay endpoint.
+	// Fallback: treat first input as direct relay endpoint.
+	relay := strings.TrimRight(candidates[0], "/")
+	_ = lastErr
 	return relay, &transport.BootstrapProfile{
 		AiwreV:         protocol.Version,
 		Relay:          relay,
+		Relays:         []string{relay},
 		Join:           "permissionless",
 		Capabilities:   []string{"v1"},
 		ShardCount:     0,
@@ -2489,6 +2697,55 @@ func resolveBootstrap(raw string) (string, *transport.BootstrapProfile, error) {
 		ReportTopic:    "human.report",
 		HumanReport:    true,
 	}, nil
+}
+
+func parseRelayCandidates(raw string) []string {
+	parts := strings.Split(strings.TrimSpace(raw), ",")
+	out := make([]string, 0, len(parts))
+	seen := map[string]struct{}{}
+	for _, p := range parts {
+		v := strings.TrimSpace(p)
+		if v == "" {
+			continue
+		}
+		v = strings.TrimRight(v, "/")
+		if _, ok := seen[v]; ok {
+			continue
+		}
+		seen[v] = struct{}{}
+		out = append(out, v)
+	}
+	return out
+}
+
+func relayCandidatesFromBootstrap(rawInput, selected string, profile *transport.BootstrapProfile) []string {
+	out := make([]string, 0, 8)
+	push := func(v string) {
+		v = strings.TrimRight(strings.TrimSpace(v), "/")
+		if v == "" {
+			return
+		}
+		for _, existing := range out {
+			if strings.EqualFold(existing, v) {
+				return
+			}
+		}
+		out = append(out, v)
+	}
+	push(selected)
+	for _, r := range parseRelayCandidates(rawInput) {
+		push(r)
+	}
+	if profile != nil {
+		push(profile.Relay)
+		for _, r := range profile.Relays {
+			push(r)
+		}
+	}
+	if len(out) == 0 && strings.TrimSpace(selected) != "" {
+		out = append(out, strings.TrimRight(strings.TrimSpace(selected), "/"))
+	}
+	return out
 }
 
 func loadOrCreateKeyPair(privPath string, pubPath string) (ed25519.PrivateKey, ed25519.PublicKey, bool, error) {
@@ -2925,13 +3182,21 @@ func runSignalHandler(parent context.Context, handler string, relay string, topi
 
 type contentPolicy struct {
 	maxBodyBytes       int
+	maxMetadataBytes   int
+	maxMetadataDepth   int
 	allowTypes         map[protocol.MessageType]struct{}
 	allowTopicPrefixes []string
 }
 
-func newContentPolicy(maxBodyBytes int, allowTypesCSV, allowTopicPrefixesCSV string) (*contentPolicy, error) {
+func newContentPolicy(maxBodyBytes, maxMetadataBytes, maxMetadataDepth int, allowTypesCSV, allowTopicPrefixesCSV string) (*contentPolicy, error) {
 	if maxBodyBytes < 0 {
 		return nil, errors.New("policy-max-body-bytes must be >= 0")
+	}
+	if maxMetadataBytes < 0 {
+		return nil, errors.New("policy-max-metadata-bytes must be >= 0")
+	}
+	if maxMetadataDepth < 0 {
+		return nil, errors.New("policy-max-metadata-depth must be >= 0")
 	}
 	types, err := parseAllowedMessageTypes(allowTypesCSV)
 	if err != nil {
@@ -2940,6 +3205,8 @@ func newContentPolicy(maxBodyBytes int, allowTypesCSV, allowTopicPrefixesCSV str
 	prefixes := parseTopicsCSV(allowTopicPrefixesCSV)
 	return &contentPolicy{
 		maxBodyBytes:       maxBodyBytes,
+		maxMetadataBytes:   maxMetadataBytes,
+		maxMetadataDepth:   maxMetadataDepth,
 		allowTypes:         types,
 		allowTopicPrefixes: prefixes,
 	}, nil
@@ -2982,6 +3249,21 @@ func (p *contentPolicy) check(msg *protocol.Message, topicHint string) error {
 	if p.maxBodyBytes > 0 && len([]byte(msg.Body)) > p.maxBodyBytes {
 		return fmt.Errorf("body too large: %d > %d", len([]byte(msg.Body)), p.maxBodyBytes)
 	}
+	if p.maxMetadataBytes > 0 && msg.Metadata != nil {
+		metaRaw, err := json.Marshal(msg.Metadata)
+		if err != nil {
+			return fmt.Errorf("metadata marshal failed: %w", err)
+		}
+		if len(metaRaw) > p.maxMetadataBytes {
+			return fmt.Errorf("metadata too large: %d > %d", len(metaRaw), p.maxMetadataBytes)
+		}
+	}
+	if p.maxMetadataDepth > 0 {
+		depth := metadataDepth(msg.Metadata)
+		if depth > p.maxMetadataDepth {
+			return fmt.Errorf("metadata depth exceeds limit: %d > %d", depth, p.maxMetadataDepth)
+		}
+	}
 	if len(p.allowTypes) > 0 {
 		if _, ok := p.allowTypes[msg.Type]; !ok {
 			return fmt.Errorf("message type %s not allowed by policy", msg.Type)
@@ -3004,6 +3286,33 @@ func (p *contentPolicy) check(msg *protocol.Message, topicHint string) error {
 		}
 	}
 	return nil
+}
+
+func metadataDepth(v any) int {
+	switch t := v.(type) {
+	case nil:
+		return 0
+	case map[string]any:
+		maxD := 1
+		for _, child := range t {
+			d := 1 + metadataDepth(child)
+			if d > maxD {
+				maxD = d
+			}
+		}
+		return maxD
+	case []any:
+		maxD := 1
+		for _, child := range t {
+			d := 1 + metadataDepth(child)
+			if d > maxD {
+				maxD = d
+			}
+		}
+		return maxD
+	default:
+		return 1
+	}
 }
 
 func enforceContentPolicyFromPath(path, topic string, policy *contentPolicy, quarantineDir string) (bool, string, error) {
@@ -4464,13 +4773,14 @@ type updateApplyResult struct {
 }
 
 type updateCandidate struct {
-	currentVersion string
-	latestVersion  string
-	releaseURL     string
-	asset          *githubAssetEntry
-	checksumAsset  *githubAssetEntry
-	eligible       bool
-	reason         string
+	currentVersion   string
+	latestVersion    string
+	releaseURL       string
+	asset            *githubAssetEntry
+	checksumAsset    *githubAssetEntry
+	checksumSigAsset *githubAssetEntry
+	eligible         bool
+	reason           string
 }
 
 type semVersion struct {
@@ -4488,7 +4798,7 @@ type updateState struct {
 	LastNote           string `json:"last_note,omitempty"`
 }
 
-func maybeAutoUpdate(stateDir, repo, currentVersion, nodeID string, allowMajor bool, rolloutPercent int, jitter time.Duration, tick bool) (bool, error) {
+func maybeAutoUpdate(stateDir, repo, currentVersion, nodeID string, allowMajor bool, requireAttestation bool, attestPubKey string, rolloutPercent int, jitter time.Duration, tick bool) (bool, error) {
 	if !isSemver(currentVersion) {
 		return false, nil
 	}
@@ -4511,7 +4821,7 @@ func maybeAutoUpdate(stateDir, repo, currentVersion, nodeID string, allowMajor b
 	}
 
 	applied, err := withUpdateLock(stateDir, func() (bool, error) {
-		res, applyErr := applyUpdate(repo, currentVersion, allowMajor, 25*time.Second)
+		res, applyErr := applyUpdate(repo, currentVersion, allowMajor, requireAttestation, attestPubKey, 25*time.Second)
 		if applyErr != nil {
 			return false, applyErr
 		}
@@ -4610,8 +4920,8 @@ func withUpdateLock(stateDir string, fn func() (bool, error)) (bool, error) {
 	return fn()
 }
 
-func checkForUpdate(repo, currentVersion string, allowMajor bool, timeout time.Duration) (*updateCheckResult, error) {
-	candidate, err := resolveUpdateCandidate(repo, currentVersion, allowMajor, timeout)
+func checkForUpdate(repo, currentVersion string, allowMajor bool, requireAttestation bool, attestPubKey string, timeout time.Duration) (*updateCheckResult, error) {
+	candidate, err := resolveUpdateCandidate(repo, currentVersion, allowMajor, requireAttestation, attestPubKey, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -4631,8 +4941,8 @@ func checkForUpdate(repo, currentVersion string, allowMajor bool, timeout time.D
 	return out, nil
 }
 
-func applyUpdate(repo, currentVersion string, allowMajor bool, timeout time.Duration) (*updateApplyResult, error) {
-	candidate, err := resolveUpdateCandidate(repo, currentVersion, allowMajor, timeout)
+func applyUpdate(repo, currentVersion string, allowMajor bool, requireAttestation bool, attestPubKey string, timeout time.Duration) (*updateApplyResult, error) {
+	candidate, err := resolveUpdateCandidate(repo, currentVersion, allowMajor, requireAttestation, attestPubKey, timeout)
 	if err != nil {
 		return nil, err
 	}
@@ -4654,6 +4964,9 @@ func applyUpdate(repo, currentVersion string, allowMajor bool, timeout time.Dura
 	if candidate.checksumAsset == nil {
 		return out, errors.New("release is missing checksums asset; refusing unsafe self-update")
 	}
+	if requireAttestation && candidate.checksumSigAsset == nil {
+		return out, errors.New("checksums attestation is required but signature asset is missing")
+	}
 
 	client := &http.Client{Timeout: timeout}
 	checksumRaw, err := downloadHTTPBytes(client, candidate.checksumAsset.URL, 2<<20)
@@ -4664,6 +4977,17 @@ func applyUpdate(repo, currentVersion string, allowMajor bool, timeout time.Dura
 	expected := strings.ToLower(strings.TrimSpace(hashByName[candidate.asset.Name]))
 	if expected == "" {
 		return out, fmt.Errorf("checksums file does not include %s", candidate.asset.Name)
+	}
+	if candidate.checksumSigAsset != nil && strings.TrimSpace(attestPubKey) != "" {
+		sigRaw, sigErr := downloadHTTPBytes(client, candidate.checksumSigAsset.URL, 1<<20)
+		if sigErr != nil {
+			return out, fmt.Errorf("download checksums signature: %w", sigErr)
+		}
+		if sigErr := verifyChecksumsAttestation(checksumRaw, sigRaw, attestPubKey); sigErr != nil {
+			return out, fmt.Errorf("checksums attestation verify failed: %w", sigErr)
+		}
+	} else if requireAttestation {
+		return out, errors.New("checksums attestation verification requires --attestation-pubkey")
 	}
 
 	archivePath, err := downloadToTempFile(client, candidate.asset.URL, "aiwre-update-*")
@@ -4698,7 +5022,7 @@ func applyUpdate(repo, currentVersion string, allowMajor bool, timeout time.Dura
 	return out, nil
 }
 
-func resolveUpdateCandidate(repo, currentVersion string, allowMajor bool, timeout time.Duration) (*updateCandidate, error) {
+func resolveUpdateCandidate(repo, currentVersion string, allowMajor bool, requireAttestation bool, attestPubKey string, timeout time.Duration) (*updateCandidate, error) {
 	repo = strings.TrimSpace(repo)
 	if repo == "" {
 		return nil, errors.New("repo is required")
@@ -4741,8 +5065,22 @@ func resolveUpdateCandidate(repo, currentVersion string, allowMajor bool, timeou
 	}
 	asset := pickReleaseAsset(release.Assets, runtime.GOOS, runtime.GOARCH)
 	checksumAsset := pickChecksumAsset(release.Assets)
+	checksumSigAsset := pickChecksumSignatureAsset(release.Assets, checksumAsset)
 	candidate.asset = asset
 	candidate.checksumAsset = checksumAsset
+	candidate.checksumSigAsset = checksumSigAsset
+	if requireAttestation {
+		if checksumSigAsset == nil {
+			candidate.reason = "attestation required but signature asset is missing"
+			candidate.eligible = false
+			return candidate, nil
+		}
+		if strings.TrimSpace(attestPubKey) == "" {
+			candidate.reason = "attestation required but public key is missing"
+			candidate.eligible = false
+			return candidate, nil
+		}
+	}
 	candidate.eligible = true
 	return candidate, nil
 }
@@ -4814,6 +5152,23 @@ func pickChecksumAsset(assets []githubAssetEntry) *githubAssetEntry {
 	return nil
 }
 
+func pickChecksumSignatureAsset(assets []githubAssetEntry, checksumAsset *githubAssetEntry) *githubAssetEntry {
+	if checksumAsset == nil {
+		return nil
+	}
+	base := strings.ToLower(strings.TrimSpace(checksumAsset.Name))
+	for i := range assets {
+		name := strings.ToLower(strings.TrimSpace(assets[i].Name))
+		if name == "" {
+			continue
+		}
+		if name == base+".sig" || name == base+".minisig" {
+			return &assets[i]
+		}
+	}
+	return nil
+}
+
 func parseChecksums(raw string) map[string]string {
 	out := map[string]string{}
 	sc := bufio.NewScanner(strings.NewReader(raw))
@@ -4839,6 +5194,65 @@ func parseChecksums(raw string) map[string]string {
 		out[name] = hash
 	}
 	return out
+}
+
+func verifyChecksumsAttestation(checksumRaw, sigRaw []byte, pubKeyRaw string) error {
+	pubKey, err := parseEd25519PublicKey(pubKeyRaw)
+	if err != nil {
+		return err
+	}
+	sig, err := parseEd25519Signature(sigRaw)
+	if err != nil {
+		return err
+	}
+	if !ed25519.Verify(pubKey, checksumRaw, sig) {
+		return errors.New("signature verification failed")
+	}
+	return nil
+}
+
+func parseEd25519PublicKey(raw string) (ed25519.PublicKey, error) {
+	v := strings.TrimSpace(raw)
+	if v == "" {
+		return nil, errors.New("attestation public key is empty")
+	}
+	if strings.HasPrefix(v, "ed25519:") {
+		v = strings.TrimPrefix(v, "ed25519:")
+	}
+	if b, err := hex.DecodeString(v); err == nil && len(b) == ed25519.PublicKeySize {
+		return ed25519.PublicKey(b), nil
+	}
+	if b, err := base64.RawStdEncoding.DecodeString(v); err == nil && len(b) == ed25519.PublicKeySize {
+		return ed25519.PublicKey(b), nil
+	}
+	if b, err := base64.StdEncoding.DecodeString(v); err == nil && len(b) == ed25519.PublicKeySize {
+		return ed25519.PublicKey(b), nil
+	}
+	return nil, errors.New("invalid attestation public key format")
+}
+
+func parseEd25519Signature(sigRaw []byte) ([]byte, error) {
+	trimmed := strings.TrimSpace(string(sigRaw))
+	if trimmed == "" {
+		return nil, errors.New("empty attestation signature")
+	}
+	fields := strings.Fields(trimmed)
+	candidates := []string{trimmed}
+	if len(fields) >= 2 {
+		candidates = append(candidates, fields[len(fields)-1])
+	}
+	for _, c := range candidates {
+		if b, err := hex.DecodeString(strings.TrimSpace(c)); err == nil && len(b) == ed25519.SignatureSize {
+			return b, nil
+		}
+		if b, err := base64.RawStdEncoding.DecodeString(strings.TrimSpace(c)); err == nil && len(b) == ed25519.SignatureSize {
+			return b, nil
+		}
+		if b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(c)); err == nil && len(b) == ed25519.SignatureSize {
+			return b, nil
+		}
+	}
+	return nil, errors.New("invalid attestation signature format")
 }
 
 func downloadHTTPBytes(client *http.Client, uri string, maxBytes int64) ([]byte, error) {
@@ -5218,7 +5632,7 @@ func roomUsageError() error {
 }
 
 func updateUsageText() string {
-	return "usage:\n  aiwre update check [--repo horacex/aiwre] [--allow-major]\n  aiwre update apply [--repo horacex/aiwre] [--allow-major]"
+	return "usage:\n  aiwre update check [--repo horacex/aiwre] [--allow-major] [--require-attestation] [--attestation-pubkey <key>]\n  aiwre update apply [--repo horacex/aiwre] [--allow-major] [--require-attestation] [--attestation-pubkey <key>]"
 }
 
 func parseCSV(raw string) []string {

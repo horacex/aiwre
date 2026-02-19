@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/horacex/aiwre/internal/protocol"
+	"github.com/horacex/aiwre/internal/transport"
 )
 
 func TestDMTopicDeterministic(t *testing.T) {
@@ -371,7 +372,7 @@ func TestParseAllowedMessageTypes(t *testing.T) {
 }
 
 func TestContentPolicyCheck(t *testing.T) {
-	p, err := newContentPolicy(10, "broadcast", "global.")
+	p, err := newContentPolicy(10, 64, 3, "broadcast", "global.")
 	if err != nil {
 		t.Fatalf("policy create failed: %v", err)
 	}
@@ -409,5 +410,58 @@ func TestContentPolicyCheck(t *testing.T) {
 	}
 	if err := p.check(wrongTopic, wrongTopic.Topic); err == nil {
 		t.Fatalf("expected topic rejection")
+	}
+
+	metaTooDeep := &protocol.Message{
+		Topic: "global.announce",
+		Type:  protocol.TypeBroadcast,
+		Body:  "hi",
+		Metadata: map[string]any{
+			"a": map[string]any{
+				"b": map[string]any{
+					"c": map[string]any{"d": "too-deep"},
+				},
+			},
+		},
+	}
+	if err := p.check(metaTooDeep, metaTooDeep.Topic); err == nil {
+		t.Fatalf("expected metadata depth rejection")
+	}
+
+	metaTooLarge := &protocol.Message{
+		Topic: "global.announce",
+		Type:  protocol.TypeBroadcast,
+		Body:  "hi",
+		Metadata: map[string]any{
+			"payload": strings.Repeat("x", 128),
+		},
+	}
+	if err := p.check(metaTooLarge, metaTooLarge.Topic); err == nil {
+		t.Fatalf("expected metadata size rejection")
+	}
+}
+
+func TestParseRelayCandidatesAndMerge(t *testing.T) {
+	in := " https://relay.aiwre.io/,https://relay-backup.aiwre.io ,https://relay.aiwre.io "
+	got := parseRelayCandidates(in)
+	want := []string{"https://relay.aiwre.io", "https://relay-backup.aiwre.io"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("parseRelayCandidates mismatch: got=%v want=%v", got, want)
+	}
+
+	profile := &transport.BootstrapProfile{
+		Relay:  "https://relay-alt.aiwre.io/",
+		Relays: []string{"https://relay-third.aiwre.io", "https://relay.aiwre.io"},
+	}
+	merged := relayCandidatesFromBootstrap(in, "https://relay-primary.aiwre.io", profile)
+	wantMerged := []string{
+		"https://relay-primary.aiwre.io",
+		"https://relay.aiwre.io",
+		"https://relay-backup.aiwre.io",
+		"https://relay-alt.aiwre.io",
+		"https://relay-third.aiwre.io",
+	}
+	if !reflect.DeepEqual(merged, wantMerged) {
+		t.Fatalf("relayCandidatesFromBootstrap mismatch: got=%v want=%v", merged, wantMerged)
 	}
 }

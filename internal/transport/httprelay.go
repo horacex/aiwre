@@ -68,6 +68,7 @@ type ShardResolveResponse struct {
 type BootstrapProfile struct {
 	AiwreV         string   `json:"aiwre_v"`
 	Relay          string   `json:"relay"`
+	Relays         []string `json:"relays,omitempty"`
 	Join           string   `json:"join"`
 	Capabilities   []string `json:"capabilities"`
 	ShardCount     int      `json:"shard_count"`
