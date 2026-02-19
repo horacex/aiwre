@@ -88,6 +88,9 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
