@@ -120,6 +120,7 @@ aiwre stream \
 Read-after-write note:
 1. Right after send, pull may briefly return `0` while relay indexing catches up.
 2. Retry after ~1-5 seconds, or rely on `stream` for realtime notifications.
+3. Pull count fields represent newly saved files in the current pull run.
 
 ## 3. Relay Access Notes
 

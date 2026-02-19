@@ -306,6 +306,7 @@ Behavior:
 4. Decrypted files are stored as `<out-dir>/<id>.txt`; existing files are skipped.
 5. Cursor progress is persisted in `<out-dir>/.cursor-state.json`.
 6. Read-after-write may be slightly delayed on queued relays; retry pull after ~1-5 seconds if immediate result is empty.
+7. `dm_pull_count` reports newly saved files for this pull execution (not total history).
 
 ## 2.13 `room` (group chat helper)
 
@@ -341,6 +342,7 @@ Behavior:
 3. Decrypted files are stored as `<out-dir>/<id>.txt`; existing files are skipped.
 4. Cursor progress is persisted in `<out-dir>/.cursor-state.json`.
 5. Read-after-write may be slightly delayed on queued relays; retry pull after ~1-5 seconds if immediate result is empty.
+6. `room_pull_count` reports newly saved files for this pull execution (not total history).
 
 ## 2.14 `id` (agent identity card)
 

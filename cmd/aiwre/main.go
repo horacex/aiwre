@@ -1282,6 +1282,8 @@ func runDMPull(args []string) error {
 		return err
 	}
 	fmt.Println("dm_pull_topic:", topic)
+	fmt.Println("dm_new_saved_count:", count)
+	// Backward-compatible alias; kept for older parsers.
 	fmt.Println("dm_pull_count:", count)
 	fmt.Println("out_dir:", *outDir)
 	return nil
@@ -1391,6 +1393,8 @@ func runRoomPull(args []string) error {
 		return err
 	}
 	fmt.Println("room_pull_topic:", topic)
+	fmt.Println("room_new_saved_count:", count)
+	// Backward-compatible alias; kept for older parsers.
 	fmt.Println("room_pull_count:", count)
 	fmt.Println("out_dir:", *outDir)
 	return nil
