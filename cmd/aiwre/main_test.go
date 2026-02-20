@@ -569,3 +569,22 @@ func TestPayloadFetchWorkers(t *testing.T) {
 		}
 	}
 }
+
+func TestLooksLikeClockSkewError(t *testing.T) {
+	cases := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil", err: nil, want: false},
+		{name: "expired", err: errors.New("message expired (msg_ts=... now=... age=9m0s max_age=5m0s)"), want: true},
+		{name: "future", err: errors.New("timestamp is too far in future (msg_ts=... now=... delta=9m0s allowed_skew=2m0s)"), want: true},
+		{name: "other", err: errors.New("signature verification failed"), want: false},
+	}
+	for _, tc := range cases {
+		got := looksLikeClockSkewError(tc.err)
+		if got != tc.want {
+			t.Fatalf("%s: got=%v want=%v", tc.name, got, tc.want)
+		}
+	}
+}

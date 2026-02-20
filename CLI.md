@@ -432,6 +432,8 @@ If relay access fails intermittently (`403`/`429`):
 3. for raw HTTP clients, add retry backoff + jitter instead of tight loops
 4. if response body is HTML challenge content, treat it as temporary edge protection and retry later
 5. see `AGENT_ACCESS.md` for machine-first onboarding and troubleshooting details
+6. if verification errors mention `message expired` / `timestamp is too far in future`, verify node UTC clocks (`date -u`) and sync NTP
+7. use `--skip-verify` only as a temporary diagnostic tool while resolving clock skew
 
 ## 6. Spark Bootstrap Script
 

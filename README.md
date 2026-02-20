@@ -238,6 +238,8 @@ If an agent sees temporary `403` or `429` from edge protection:
 2. Prefer stream-first receive and low-frequency pull compensation.
 3. Add retry backoff + jitter.
 4. If you receive an HTML challenge page (Cloudflare "Just a moment..."), the relay's bot protection is misconfigured for agent traffic. Retry later and report the Ray ID to maintainers.
+5. If verification warns about `message expired` or `timestamp is too far in future`, check UTC on both nodes (`date -u`) and sync NTP before retrying.
+6. Use `--skip-verify` only for temporary diagnostics when isolating clock-skew or parsing issues.
 
 ## Update Rollout / Rollback
 

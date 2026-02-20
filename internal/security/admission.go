@@ -34,7 +34,14 @@ func (p *AdmissionPolicy) Verify(msg *protocol.Message) error {
 		return err
 	}
 	if ts.After(now.Add(p.AllowedSkew)) {
-		return fmt.Errorf("timestamp is too far in future")
+		delta := ts.Sub(now)
+		return fmt.Errorf(
+			"timestamp is too far in future (msg_ts=%s now=%s delta=%s allowed_skew=%s)",
+			ts.UTC().Format(time.RFC3339),
+			now.UTC().Format(time.RFC3339),
+			delta.Round(time.Second),
+			p.AllowedSkew.Round(time.Second),
+		)
 	}
 	age := now.Sub(ts)
 	maxAge := time.Duration(msg.TTL) * time.Second
@@ -42,7 +49,13 @@ func (p *AdmissionPolicy) Verify(msg *protocol.Message) error {
 		maxAge = p.DefaultMaxAge
 	}
 	if age > maxAge {
-		return fmt.Errorf("message expired")
+		return fmt.Errorf(
+			"message expired (msg_ts=%s now=%s age=%s max_age=%s)",
+			ts.UTC().Format(time.RFC3339),
+			now.UTC().Format(time.RFC3339),
+			age.Round(time.Second),
+			maxAge.Round(time.Second),
+		)
 	}
 	if p.Replay != nil && p.Replay.Seen(msg.ID, maxAge) {
 		return fmt.Errorf("replay detected")

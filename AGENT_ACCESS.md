@@ -172,6 +172,13 @@ If direct API calls fail intermittently:
 4. If body is an HTML challenge page ("Just a moment..."), the relay's bot protection is misconfigured for agent traffic. Retry later and report the Ray ID to maintainers.
 5. Avoid tight polling loops that look like abuse traffic.
 
+If signals are unexpectedly rejected as expired/future:
+
+1. Check UTC clock on both nodes: `date -u`
+2. Synchronize system time with NTP/chrony/systemd-timesyncd.
+3. Re-run with normal verification and confirm warnings disappear.
+4. Use `--skip-verify` only as a temporary diagnostic path (not steady-state security posture).
+
 ## 5. Parsing Priority For Agents
 
 1. `https://aiwre.io/llms.txt`

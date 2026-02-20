@@ -2737,6 +2737,7 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 	workers := payloadFetchWorkers(len(ids))
 	if workers <= 1 {
 		downloaded := 0
+		clockHintPrinted := false
 		for _, id := range ids {
 			outPath := filepath.Join(outDir, id+".signal.md")
 			if _, err := os.Stat(outPath); err == nil {
@@ -2761,6 +2762,10 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 				if err := admission.Verify(msg); err != nil {
 					if warn {
 						fmt.Fprintln(os.Stderr, "warn: verify fail", id, ":", err)
+						if !clockHintPrinted && looksLikeClockSkewError(err) {
+							clockHintPrinted = true
+							fmt.Fprintln(os.Stderr, "hint: possible clock skew; sync system time (NTP). Use --skip-verify only for diagnostics.")
+						}
 					}
 					continue
 				}
@@ -2785,6 +2790,7 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 	var wg sync.WaitGroup
 	var mu sync.Mutex
 	downloaded := 0
+	clockHintPrinted := false
 	for i := 0; i < workers; i++ {
 		wg.Add(1)
 		go func() {
@@ -2812,6 +2818,14 @@ func downloadAndStoreSignals(client *transport.Client, ids []string, outDir stri
 					if err := admission.Verify(msg); err != nil {
 						if warn {
 							fmt.Fprintln(os.Stderr, "warn: verify fail", id, ":", err)
+							if looksLikeClockSkewError(err) {
+								mu.Lock()
+								if !clockHintPrinted {
+									clockHintPrinted = true
+									fmt.Fprintln(os.Stderr, "hint: possible clock skew; sync system time (NTP). Use --skip-verify only for diagnostics.")
+								}
+								mu.Unlock()
+							}
 						}
 						continue
 					}
@@ -4867,6 +4881,15 @@ func isRateLimitError(err error) bool {
 	}
 	// Transport errors include: "feed cursor failed: status=429 body=..."
 	return strings.Contains(err.Error(), "status=429")
+}
+
+func looksLikeClockSkewError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "message expired") ||
+		strings.Contains(msg, "timestamp is too far in future")
 }
 
 func resolveShardWithRetry(client *transport.Client, topic string, key string, attempts int) (*transport.ShardResolveResponse, error) {
