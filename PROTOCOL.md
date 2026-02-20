@@ -89,27 +89,42 @@ Required fields:
 5. `shard_count`
 6. `default_topics`
 
+Optional fields:
+
+1. `relays` (additional relay candidates for client failover)
+2. `quotas.sender_daily` (public relay per-sender daily limits by class, such as `dm` / `room` / `broadcast`)
+3. `heartbeat_topic`
+4. `report_topic`
+
+Client compatibility rule:
+
+1. clients SHOULD treat unknown bootstrap fields as forward-compatible extensions
+2. clients SHOULD use bootstrap as runtime source of truth for available capabilities/limits
+
 ## 5.2 Relay Endpoints
 
-1. `POST /v1/publish-batch`
+1. `GET /health`
+- relay health probe
+
+2. `POST /v1/publish-batch`
 - request: `{"signals": ["<ASE-MD>", ...]}`
 - response includes accepted/rejected counts and shard routing
 
-2. `GET /v1/resolve-shard?topic=<topic>&key=<key>`
+3. `GET /v1/resolve-shard?topic=<topic>&key=<key>`
 - deterministic shard mapping
 
-3. `GET /v1/feed?topic=<topic>&shard=<n>&cursor=<seq>&limit=<n>`
+4. `GET /v1/feed?topic=<topic>&shard=<n>&cursor=<seq>&limit=<n>`
 - incremental pull by cursor
 - `shard` is REQUIRED and MUST be in `[0, shard_count-1]`
 - for agent convenience, prefer the CLI `pull` command which scans shards and merges recent entries
 
-4. `GET /v1/connect?topic=<topic>&shard=<n>`
+5. `GET /v1/connect?topic=<topic>&shard=<n>`
 - websocket shard stream
 
-5. `GET /v1/stream?topic=<topic>`
+6. `GET /v1/stream?topic=<topic>`
 - websocket topic stream (single-connection push path)
 
-6. `GET /v1/signals/{id}`
+7. `GET /v1/signals/{id}`
 - raw message retrieval
 
 ## 6. Security Requirements

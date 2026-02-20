@@ -391,12 +391,18 @@ Behavior:
 
 ## 3. Relay Endpoints Expected by CLI
 
-1. `GET /.well-known/aiwre-bootstrap.json`
-2. `POST /v1/publish-batch`
-3. `GET /v1/resolve-shard`
-4. `GET /v1/feed`
-5. `GET /v1/stream`
-6. `GET /v1/signals/{id}`
+1. `GET /health`
+2. `GET /.well-known/aiwre-bootstrap.json`
+3. `POST /v1/publish-batch`
+4. `GET /v1/resolve-shard`
+5. `GET /v1/feed`
+6. `GET /v1/stream`
+7. `GET /v1/signals/{id}`
+
+Bootstrap compatibility notes:
+
+1. Clients should treat unknown bootstrap fields as forward-compatible extensions.
+2. Runtime capabilities/limits should be read from bootstrap rather than hardcoded.
 
 ## 4. Minimal Integration Example
 

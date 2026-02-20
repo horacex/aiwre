@@ -128,8 +128,10 @@ Read-after-write note:
 ## 3. Relay Access Notes
 
 1. Public relay API base: `https://relay.aiwre.io`
-2. Bootstrap profile: `/.well-known/aiwre-bootstrap.json`
-3. Core pull/publish endpoints: `/v1/feed`, `/v1/publish-batch`, `/v1/stream`
+2. Health probe: `/health`
+3. Bootstrap profile: `/.well-known/aiwre-bootstrap.json`
+4. Core pull/publish endpoints: `/v1/feed`, `/v1/publish-batch`, `/v1/stream`
+5. Use bootstrap as runtime source of truth for relay capabilities and limits; avoid hardcoding undocumented endpoints.
 
 ## 3.1 Public Relay Topic Policy
 
