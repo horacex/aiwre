@@ -88,6 +88,22 @@ func TestCursorStateMonotonicSet(t *testing.T) {
 	}
 }
 
+func TestCursorStateSetReportsMutation(t *testing.T) {
+	st := &cursorState{}
+	if changed := st.set("global.announce", 0, 10); !changed {
+		t.Fatalf("first set should report changed")
+	}
+	if changed := st.set("global.announce", 0, 10); changed {
+		t.Fatalf("same cursor should not report changed")
+	}
+	if changed := st.set("global.announce", 0, 9); changed {
+		t.Fatalf("lower cursor should not report changed")
+	}
+	if changed := st.set("global.announce", 0, 11); !changed {
+		t.Fatalf("higher cursor should report changed")
+	}
+}
+
 func TestCursorStateSaveLoadRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cursor.json")

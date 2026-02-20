@@ -2583,16 +2583,21 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 
 		entries := make([]transport.FeedEntry, 0, limit*2)
 		okPulled := 0
+		cursorUpdated := false
 		for item := range respCh {
 			if item.err != nil || item.resp == nil {
 				continue
 			}
 			okPulled++
-			state.set(topic, item.shard, item.resp.NextCursor)
+			if state.set(topic, item.shard, item.resp.NextCursor) {
+				cursorUpdated = true
+			}
 			entries = append(entries, item.resp.Entries...)
 		}
 		if okPulled > 0 {
-			_ = saveCursorState(cursorFile, state)
+			if cursorUpdated {
+				_ = saveCursorState(cursorFile, state)
+			}
 			if len(entries) == 0 {
 				return nil, nil
 			}
@@ -2699,18 +2704,23 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 
 	entries := make([]transport.FeedEntry, 0, limit*2)
 	okPulled := 0
+	cursorUpdated := false
 	for item := range respCh {
 		if item.err != nil || item.resp == nil {
 			continue
 		}
 		okPulled++
-		state.set(topic, item.shard, item.resp.NextCursor)
+		if state.set(topic, item.shard, item.resp.NextCursor) {
+			cursorUpdated = true
+		}
 		entries = append(entries, item.resp.Entries...)
 	}
 	if okPulled == 0 {
 		return nil, errors.New("feed unavailable for all shards")
 	}
-	_ = saveCursorState(cursorFile, state)
+	if cursorUpdated {
+		_ = saveCursorState(cursorFile, state)
+	}
 	if len(entries) == 0 {
 		return nil, nil
 	}
@@ -4937,13 +4947,15 @@ func collectRecentSignalIDsForShard(client *transport.Client, topic string, shar
 				}
 				tailResp, tailErr := feedCursorWithRetry(client, topic, shard, tailCursor, limit, 5)
 				if tailErr == nil && tailResp != nil {
-					state.set(topic, shard, tailResp.NextCursor)
-					_ = saveCursorState(cursorFile, state)
+					if state.set(topic, shard, tailResp.NextCursor) {
+						_ = saveCursorState(cursorFile, state)
+					}
 					return collectIDsFromEntries(tailResp.Entries, limit), nil
 				}
 			}
-			state.set(topic, shard, resp.NextCursor)
-			_ = saveCursorState(cursorFile, state)
+			if state.set(topic, shard, resp.NextCursor) {
+				_ = saveCursorState(cursorFile, state)
+			}
 			return collectIDsFromEntries(resp.Entries, limit), nil
 		}
 	}
@@ -4966,8 +4978,9 @@ func collectRecentSignalIDsForShard(client *transport.Client, topic string, shar
 	if resp == nil {
 		return nil, nil
 	}
-	state.set(topic, shard, resp.NextCursor)
-	_ = saveCursorState(cursorFile, state)
+	if state.set(topic, shard, resp.NextCursor) {
+		_ = saveCursorState(cursorFile, state)
+	}
 	return collectIDsFromEntries(resp.Entries, limit), nil
 }
 
@@ -5065,9 +5078,9 @@ func (s *cursorState) get(topic string, shard int) (int64, bool) {
 	return v, ok
 }
 
-func (s *cursorState) set(topic string, shard int, cursor int64) {
+func (s *cursorState) set(topic string, shard int, cursor int64) bool {
 	if s == nil || cursor < 0 {
-		return
+		return false
 	}
 	if s.Cursors == nil {
 		s.Cursors = map[string]int64{}
@@ -5076,7 +5089,9 @@ func (s *cursorState) set(topic string, shard int, cursor int64) {
 	prev, ok := s.Cursors[key]
 	if !ok || cursor > prev {
 		s.Cursors[key] = cursor
+		return true
 	}
+	return false
 }
 
 type githubRelease struct {
