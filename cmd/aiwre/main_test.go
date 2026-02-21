@@ -638,6 +638,64 @@ func TestCollectRecentSignalIDsSkipsTailForUpToDateShards(t *testing.T) {
 	}
 }
 
+func TestCollectRecentSignalIDsSkipsTailWhenTopicEmpty(t *testing.T) {
+	shardSelectionCacheMu.Lock()
+	shardSelectionCache = map[string]shardSelectionCacheEntry{}
+	shardSelectionCacheMu.Unlock()
+
+	var mu sync.Mutex
+	headCalls := 0
+	tailCalls := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/feed" {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+		mu.Lock()
+		if cursor == 0 && limit == 1 {
+			headCalls++
+		} else {
+			tailCalls++
+		}
+		mu.Unlock()
+
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"topic":       "agent.heartbeat",
+			"shard":       0,
+			"cursor":      cursor,
+			"next_cursor": cursor,
+			"max_seq":     0,
+			"count":       0,
+			"entries":     []any{},
+		})
+	}))
+	defer srv.Close()
+
+	client := transport.NewClient(srv.URL)
+	ids, err := collectRecentSignalIDs(client, "agent.heartbeat", 20, 4, filepath.Join(t.TempDir(), ".cursor-state.json"))
+	if err != nil {
+		t.Fatalf("collectRecentSignalIDs failed: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("expected no ids, got=%v", ids)
+	}
+
+	mu.Lock()
+	gotHead := headCalls
+	gotTail := tailCalls
+	mu.Unlock()
+	if gotHead != 4 {
+		t.Fatalf("expected head scan on all shards, got=%d", gotHead)
+	}
+	if gotTail != 0 {
+		t.Fatalf("expected 0 tail calls for empty topic, got=%d", gotTail)
+	}
+}
+
 func TestPayloadFetchWorkers(t *testing.T) {
 	cases := []struct {
 		in   int

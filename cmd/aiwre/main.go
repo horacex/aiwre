@@ -2715,19 +2715,29 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 	if okShards == 0 {
 		return nil, errors.New("feed unavailable for all shards")
 	}
+	nonEmpty := make([]shardMeta, 0, len(metas))
+	for _, m := range metas {
+		if m.max > 0 {
+			nonEmpty = append(nonEmpty, m)
+		}
+	}
+	// No signals in this topic yet: stop here and avoid unnecessary tail requests.
+	if len(nonEmpty) == 0 {
+		return nil, nil
+	}
 
 	// Prefer shards with the most unseen data; otherwise fall back to the most active shards.
-	sort.Slice(metas, func(i, j int) bool {
-		if metas[i].delta == metas[j].delta {
-			return metas[i].max > metas[j].max
+	sort.Slice(nonEmpty, func(i, j int) bool {
+		if nonEmpty[i].delta == nonEmpty[j].delta {
+			return nonEmpty[i].max > nonEmpty[j].max
 		}
-		return metas[i].delta > metas[j].delta
+		return nonEmpty[i].delta > nonEmpty[j].delta
 	})
-	if len(metas) > targetShards {
-		metas = metas[:targetShards]
+	if len(nonEmpty) > targetShards {
+		nonEmpty = nonEmpty[:targetShards]
 	}
-	selectedShards := make([]int, 0, len(metas))
-	for _, m := range metas {
+	selectedShards := make([]int, 0, len(nonEmpty))
+	for _, m := range nonEmpty {
 		selectedShards = append(selectedShards, m.shard)
 	}
 	setShardSelectionCache(client, topic, shardCount, selectedShards)
@@ -2737,9 +2747,9 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 		resp  *transport.CursorFeedResponse
 		err   error
 	}
-	respCh := make(chan shardResp, len(metas))
+	respCh := make(chan shardResp, len(nonEmpty))
 	wg = sync.WaitGroup{}
-	for _, m := range metas {
+	for _, m := range nonEmpty {
 		wg.Add(1)
 		go func(m shardMeta) {
 			defer wg.Done()
