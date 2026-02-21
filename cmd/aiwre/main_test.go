@@ -4,11 +4,15 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -547,6 +551,90 @@ func TestShardSelectionCacheSetGet(t *testing.T) {
 	again := getShardSelectionCache(client, "global.announce", 32, 8)
 	if !reflect.DeepEqual(again, want) {
 		t.Fatalf("cache should be immutable to callers: got=%v want=%v", again, want)
+	}
+}
+
+func TestCollectRecentSignalIDsSkipsTailForUpToDateShards(t *testing.T) {
+	shardSelectionCacheMu.Lock()
+	shardSelectionCache = map[string]shardSelectionCacheEntry{}
+	shardSelectionCacheMu.Unlock()
+
+	dir := t.TempDir()
+	cursorFile := filepath.Join(dir, ".cursor-state.json")
+	state := &cursorState{
+		Version: 1,
+		Cursors: map[string]int64{
+			cursorKey("agent.heartbeat", 0): 10,
+			cursorKey("agent.heartbeat", 1): 8,
+		},
+	}
+	if err := saveCursorState(cursorFile, state); err != nil {
+		t.Fatalf("save cursor state: %v", err)
+	}
+
+	var mu sync.Mutex
+	headCalls := 0
+	incCalls := 0
+	tailCalls := 0
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/v1/feed" {
+			http.Error(w, `{"error":"not found"}`, http.StatusNotFound)
+			return
+		}
+		shard, _ := strconv.Atoi(r.URL.Query().Get("shard"))
+		cursor, _ := strconv.ParseInt(r.URL.Query().Get("cursor"), 10, 64)
+		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+
+		mu.Lock()
+		switch {
+		case cursor == 0 && limit == 1:
+			headCalls++
+		case (shard == 0 && cursor == 10) || (shard == 1 && cursor == 8):
+			incCalls++
+		default:
+			tailCalls++
+		}
+		mu.Unlock()
+
+		maxSeq := int64(10)
+		if shard == 1 {
+			maxSeq = 8
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"topic":       "agent.heartbeat",
+			"shard":       shard,
+			"cursor":      cursor,
+			"next_cursor": cursor,
+			"max_seq":     maxSeq,
+			"count":       0,
+			"entries":     []any{},
+		})
+	}))
+	defer srv.Close()
+
+	client := transport.NewClient(srv.URL)
+	ids, err := collectRecentSignalIDs(client, "agent.heartbeat", 20, 2, cursorFile)
+	if err != nil {
+		t.Fatalf("collectRecentSignalIDs failed: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("expected no ids, got=%v", ids)
+	}
+
+	mu.Lock()
+	gotHead := headCalls
+	gotInc := incCalls
+	gotTail := tailCalls
+	mu.Unlock()
+	if gotHead != 2 {
+		t.Fatalf("expected 2 head calls, got=%d", gotHead)
+	}
+	if gotInc != 0 {
+		t.Fatalf("expected 0 incremental calls for up-to-date shards, got=%d", gotInc)
+	}
+	if gotTail != 0 {
+		t.Fatalf("expected 0 tail calls for up-to-date shards, got=%d", gotTail)
 	}
 }
 

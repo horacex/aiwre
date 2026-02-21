@@ -2664,9 +2664,11 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 	}
 
 	type shardMeta struct {
-		shard int
-		max   int64
-		delta int64 // max - savedCursor (0 if no saved cursor)
+		shard    int
+		max      int64
+		saved    int64
+		hasSaved bool
+		delta    int64 // unseen count estimate (max-saved or max when no saved cursor)
 	}
 	type metaResult struct {
 		m   shardMeta
@@ -2687,10 +2689,15 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 			}
 			saved, ok := state.get(topic, s)
 			delta := int64(0)
-			if ok && head.MaxSeq > saved {
-				delta = head.MaxSeq - saved
+			if ok {
+				if head.MaxSeq > saved {
+					delta = head.MaxSeq - saved
+				}
+			} else {
+				// No local cursor means unseen history; treat current max as backlog estimate.
+				delta = head.MaxSeq
 			}
-			metaCh <- metaResult{m: shardMeta{shard: s, max: head.MaxSeq, delta: delta}, err: nil}
+			metaCh <- metaResult{m: shardMeta{shard: s, max: head.MaxSeq, saved: saved, hasSaved: ok, delta: delta}, err: nil}
 		}(shard)
 	}
 	wg.Wait()
@@ -2734,28 +2741,41 @@ func collectRecentSignalIDs(client *transport.Client, topic string, limit int, s
 	wg = sync.WaitGroup{}
 	for _, m := range metas {
 		wg.Add(1)
-		go func(s int, maxSeq int64) {
+		go func(m shardMeta) {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			if savedCursor, ok := state.get(topic, s); ok && maxSeq > savedCursor {
+			if m.hasSaved && m.max <= m.saved {
+				// Up-to-date shard: avoid redundant tail reads.
+				respCh <- shardResp{
+					shard: m.shard,
+					resp: &transport.CursorFeedResponse{
+						NextCursor: m.saved,
+						MaxSeq:     m.max,
+					},
+					err: nil,
+				}
+				return
+			}
+
+			if m.hasSaved && m.max > m.saved {
 				// Incremental catch-up.
-				resp, err := feedCursorWithRetry(client, topic, s, savedCursor, incrementalLimit, 5)
+				resp, err := feedCursorWithRetry(client, topic, m.shard, m.saved, incrementalLimit, 5)
 				if err == nil && resp != nil {
-					respCh <- shardResp{shard: s, resp: resp, err: nil}
+					respCh <- shardResp{shard: m.shard, resp: resp, err: nil}
 					return
 				}
 			}
 
 			// Fallback: read tail window.
-			tailCursor := maxSeq - int64(perShard)
+			tailCursor := m.max - int64(perShard)
 			if tailCursor < 0 {
 				tailCursor = 0
 			}
-			resp, err := feedCursorWithRetry(client, topic, s, tailCursor, perShard, 5)
-			respCh <- shardResp{shard: s, resp: resp, err: err}
-		}(m.shard, m.max)
+			resp, err := feedCursorWithRetry(client, topic, m.shard, tailCursor, perShard, 5)
+			respCh <- shardResp{shard: m.shard, resp: resp, err: err}
+		}(m)
 	}
 	wg.Wait()
 	close(respCh)
