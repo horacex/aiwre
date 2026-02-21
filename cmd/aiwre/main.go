@@ -19,6 +19,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"hash/fnv"
 	"io"
 	"math/big"
 	"net/http"
@@ -1440,6 +1441,8 @@ const (
 	defaultUpdateRepo        = "horacex/aiwre"
 	defaultUpdateAttestPub   = ""
 	payloadFetchWorkerMax    = 4
+	streamPingInterval       = 45 * time.Second
+	streamPingTimeout        = 8 * time.Second
 )
 
 type agentCardRecord struct {
@@ -1750,7 +1753,7 @@ func runAutojoin(args []string) error {
 						}
 					}
 				}
-				runAutojoinStreamWorker(ctx, relayCandidates, t, out, base, max, strings.TrimSpace(*handler), onSaved, func(received, saved, errs int) {
+				runAutojoinStreamWorker(ctx, relayCandidates, t, out, base, max, selfID, strings.TrimSpace(*handler), onSaved, func(received, saved, errs int) {
 					statsMu.Lock()
 					st := stats[t]
 					st.received += received
@@ -2068,6 +2071,7 @@ func runStream(args []string) error {
 	stats := make([]*topicStats, 0, len(wantTopics))
 	var statsMu sync.Mutex
 	var wg sync.WaitGroup
+	hostSeed, _ := os.Hostname()
 	for _, t := range wantTopics {
 		topicName := strings.TrimSpace(t)
 		if topicName == "" {
@@ -2079,7 +2083,7 @@ func runStream(args []string) error {
 		go func(topic string, s *topicStats) {
 			defer wg.Done()
 			backoff := 2 * time.Second
-			relayIdx := 0
+			relayIdx := relayStartIndex(hostSeed+"|"+topic, len(relayCandidates))
 			for {
 				if ctx.Err() != nil {
 					return
@@ -2091,8 +2095,10 @@ func runStream(args []string) error {
 					statsMu.Lock()
 					s.errors++
 					statsMu.Unlock()
+					delay := jitterBackoff(backoff)
+					fmt.Fprintln(os.Stderr, "warn: stream reconnect topic=", topic, "relay=", currentRelay, "reason=", err, "next=", delay)
 					relayIdx++
-					if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+					if !sleepWithContext(ctx, delay) {
 						return
 					}
 					backoff = growBackoff(backoff, 2*time.Minute)
@@ -2103,13 +2109,18 @@ func runStream(args []string) error {
 					statsMu.Lock()
 					s.errors++
 					statsMu.Unlock()
+					delay := jitterBackoff(backoff)
+					fmt.Fprintln(os.Stderr, "warn: stream reconnect topic=", topic, "relay=", currentRelay, "reason=", err, "next=", delay)
 					relayIdx++
-					if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+					if !sleepWithContext(ctx, delay) {
 						return
 					}
 					backoff = growBackoff(backoff, 2*time.Minute)
 					continue
 				}
+				startStreamKeepalive(ctx, conn)
+				connectedAt := time.Now().UTC()
+				fmt.Println("stream_connected:", topic, "relay:", currentRelay)
 				backoff = 2 * time.Second
 
 				for {
@@ -2122,6 +2133,8 @@ func runStream(args []string) error {
 						statsMu.Lock()
 						s.errors++
 						statsMu.Unlock()
+						delay := jitterBackoff(backoff)
+						fmt.Fprintln(os.Stderr, "warn: stream reconnect topic=", topic, "relay=", currentRelay, "uptime=", time.Since(connectedAt).Round(time.Second), "reason=", err, "next=", delay)
 						relayIdx++
 						break
 					}
@@ -2173,7 +2186,8 @@ func runStream(args []string) error {
 						}
 					}
 				}
-				if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+				delay := jitterBackoff(backoff)
+				if !sleepWithContext(ctx, delay) {
 					return
 				}
 				backoff = growBackoff(backoff, 2*time.Minute)
@@ -2217,6 +2231,7 @@ func runAutojoinStreamWorker(
 	outDir string,
 	reconnectBase time.Duration,
 	reconnectMax time.Duration,
+	startSeed string,
 	handler string,
 	onSaved func(client *transport.Client, topic, id, path string),
 	onUpdate func(received, saved, errs int),
@@ -2231,7 +2246,7 @@ func runAutojoinStreamWorker(
 		onUpdate(0, 0, 1)
 		return
 	}
-	relayIdx := 0
+	relayIdx := relayStartIndex(startSeed+"|"+topic, len(relays))
 	backoff := reconnectBase
 	for {
 		if ctx.Err() != nil {
@@ -2242,8 +2257,10 @@ func runAutojoinStreamWorker(
 		streamURL, err := client.StreamURL(topic)
 		if err != nil {
 			onUpdate(0, 0, 1)
+			delay := jitterBackoff(backoff)
+			fmt.Fprintln(os.Stderr, "warn: autojoin stream reconnect topic=", topic, "relay=", currentRelay, "reason=", err, "next=", delay)
 			relayIdx++
-			if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+			if !sleepWithContext(ctx, delay) {
 				return
 			}
 			backoff = growBackoff(backoff, reconnectMax)
@@ -2252,13 +2269,18 @@ func runAutojoinStreamWorker(
 		conn, _, err := websocket.Dial(ctx, streamURL, nil)
 		if err != nil {
 			onUpdate(0, 0, 1)
+			delay := jitterBackoff(backoff)
+			fmt.Fprintln(os.Stderr, "warn: autojoin stream reconnect topic=", topic, "relay=", currentRelay, "reason=", err, "next=", delay)
 			relayIdx++
-			if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+			if !sleepWithContext(ctx, delay) {
 				return
 			}
 			backoff = growBackoff(backoff, reconnectMax)
 			continue
 		}
+		startStreamKeepalive(ctx, conn)
+		connectedAt := time.Now().UTC()
+		fmt.Println("autojoin_stream_connected:", topic, "relay:", currentRelay)
 		backoff = reconnectBase
 		admission := security.NewAdmissionPolicy()
 		for {
@@ -2269,6 +2291,8 @@ func runAutojoinStreamWorker(
 					return
 				}
 				onUpdate(0, 0, 1)
+				delay := jitterBackoff(backoff)
+				fmt.Fprintln(os.Stderr, "warn: autojoin stream reconnect topic=", topic, "relay=", currentRelay, "uptime=", time.Since(connectedAt).Round(time.Second), "reason=", err, "next=", delay)
 				break
 			}
 			var ev streamEvent
@@ -2298,7 +2322,8 @@ func runAutojoinStreamWorker(
 			}
 			onUpdate(1, 0, 0)
 		}
-		if !sleepWithContext(ctx, jitterBackoff(backoff)) {
+		delay := jitterBackoff(backoff)
+		if !sleepWithContext(ctx, delay) {
 			return
 		}
 		relayIdx++
@@ -2315,6 +2340,39 @@ func growBackoff(current, max time.Duration) time.Duration {
 		return max
 	}
 	return next
+}
+
+func relayStartIndex(seed string, count int) int {
+	if count <= 1 {
+		return 0
+	}
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(strings.TrimSpace(seed)))
+	return int(h.Sum32() % uint32(count))
+}
+
+func startStreamKeepalive(ctx context.Context, conn *websocket.Conn) {
+	if conn == nil {
+		return
+	}
+	go func() {
+		ticker := time.NewTicker(streamPingInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				pingCtx, cancel := context.WithTimeout(ctx, streamPingTimeout)
+				err := conn.Ping(pingCtx)
+				cancel()
+				if err != nil {
+					_ = conn.Close(websocket.StatusPolicyViolation, "ping failed")
+					return
+				}
+			}
+		}
+	}()
 }
 
 func jitterBackoff(base time.Duration) time.Duration {

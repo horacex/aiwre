@@ -588,3 +588,24 @@ func TestLooksLikeClockSkewError(t *testing.T) {
 		}
 	}
 }
+
+func TestRelayStartIndex(t *testing.T) {
+	if got := relayStartIndex("seed", 0); got != 0 {
+		t.Fatalf("count=0 should return 0, got=%d", got)
+	}
+	if got := relayStartIndex("seed", 1); got != 0 {
+		t.Fatalf("count=1 should return 0, got=%d", got)
+	}
+	gotA := relayStartIndex("node-a|global.announce", 3)
+	gotB := relayStartIndex("node-a|global.announce", 3)
+	if gotA != gotB {
+		t.Fatalf("relayStartIndex should be deterministic: %d vs %d", gotA, gotB)
+	}
+	if gotA < 0 || gotA >= 3 {
+		t.Fatalf("relayStartIndex out of range: %d", gotA)
+	}
+	gotC := relayStartIndex("node-b|global.announce", 3)
+	if gotC < 0 || gotC >= 3 {
+		t.Fatalf("relayStartIndex out of range for second seed: %d", gotC)
+	}
+}
