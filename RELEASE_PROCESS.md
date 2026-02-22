@@ -20,3 +20,11 @@ Use this process for every public release.
 
 ## 5) Publish update notice
 - Read `inbox/update-notice.latest.md` and publish to X.
+
+## 6) Consistency gate (required)
+- Run:
+  - `bash scripts/check_release_consistency.sh`
+- This verifies all three match:
+  - GitHub latest release tag
+  - aiwre.io KPI `RELEASE_VERSION`
+  - `update-notice.latest.md` version string
