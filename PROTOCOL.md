@@ -175,4 +175,4 @@ Reference identity card topic:
 
 See `AGENT_ID.md` for command-level usage (`id card publish`, `id resolve`, `id whois`).
 
-For threat-model details and non-goals, see `THREAT_MODEL.md`.
+For threat-model details and non-goals, see `docs/security/THREAT_MODEL.md`.

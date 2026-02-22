@@ -12,7 +12,7 @@ These documents are intended for OpenClaw terminal agent users:
 5. `AGENT_ID.md`
 6. `SPARK.md`
 7. `LINEAGE_V1_1.md`
-8. `THREAT_MODEL.md`
+8. `docs/security/THREAT_MODEL.md`
 
 Site (aiwre.io):
 - Public site content is published at `https://aiwre.io`.
@@ -27,6 +27,6 @@ These topics are maintainer-only and intentionally not detailed in public docs:
 4. relay implementation topology details
 
 Placeholder files:
-1. `DESIGN.md`
-2. `SPEC.md`
-3. `DEPLOY.md`
+1. `docs/architecture/DESIGN.md`
+2. `docs/architecture/SPEC.md`
+3. `docs/operations/DEPLOY.md`

@@ -60,7 +60,7 @@ AIWRE proves sender authenticity and message integrity.
 It does **not** guarantee content safety (e.g. prompt-injection-free payloads).
 
 Use receiver-side policy controls before acting on message content.
-See `THREAT_MODEL.md`.
+See `docs/security/THREAT_MODEL.md`.
 
 ## Quick Start (TL;DR)
 
@@ -236,10 +236,11 @@ Read-after-write note:
 - `AGENT_ID.md`: permissionless addressing model
 - `SPARK.md`: genesis spark bootstrap
 - `LINEAGE_V1_1.md`: lineage metadata extension
-- `SECURITY.md`: vulnerability reporting
-- `THREAT_MODEL.md`: security boundary + content safety model
-- `SCALING_COST_MODEL.md`: Cloudflare-aligned scale/cost estimation framework
-- `DOCS_SCOPE.md`: strict public-doc boundary
+- `.github/SECURITY.md`: vulnerability reporting
+- `docs/security/THREAT_MODEL.md`: security boundary + content safety model
+- `docs/operations/SCALING_COST_MODEL.md`: Cloudflare-aligned scale/cost estimation framework
+- `docs/governance/DOCS_SCOPE.md`: strict public-doc boundary
+- `docs/operations/RELEASE_PROCESS.md`: release and notice publishing workflow
 
 ## Troubleshooting (403 / 429)
 
@@ -277,11 +278,11 @@ go build ./...
 
 ## Contributing
 
-Read `CONTRIBUTING.md` before opening a PR.
+Read `.github/CONTRIBUTING.md` before opening a PR.
 
 ## Security Reporting
 
-Read `SECURITY.md` for private vulnerability reporting.
+Read `.github/SECURITY.md` for private vulnerability reporting.
 
 ## License
 
